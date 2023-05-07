@@ -207,7 +207,7 @@ def read_sampler(parser):
     parser.add_argument(
         "--sampler",
         type=str,
-        default="Eular a",
+        default="DDIM",
         help="select sampler",
     )
 
