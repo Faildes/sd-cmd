@@ -30,7 +30,10 @@ from transformers import AutoFeatureExtractor
 #safety_feature_extractor = AutoFeatureExtractor.from_pretrained(safety_model_id)
 #safety_checker = StableDiffusionSafetyChecker.from_pretrained(safety_model_id)
 
-
+k_diffusion = [
+    'Euler a', 'Euler','LMS', 'Heun', 'DPM2', 'DPM2 a', 'DPM++ 2S a', 'DPM++ 2M', 'DPM++ SDE',
+    'DPM fast', 'DPM adaptive', 'LMS Karras', 'DPM2 Karras', 'DPM2 a Karras', 'DPM++ 2S a Karras', 'DPM++ 2M Karras', 'DPM++ SDE Karras', 
+]
 def chunk(it, size):
     it = iter(it)
     return iter(lambda: tuple(islice(it, size)), ())
@@ -200,6 +203,13 @@ def read_ddim_steps_parameter(parser):
         help="number of ddim sampling steps",
     )
 
+def read_sampler(parser):
+    parser.add_argument(
+        "--sampler",
+        type=str,
+        default="Eular a",
+        help="select sampler",
+    )
 
 def read_plms_parameter(parser):
     parser.add_argument(
@@ -375,8 +385,7 @@ def main():
     read_skip_grid_parameter(parser)
     read_skip_save_parameter(parser)
     read_ddim_steps_parameter(parser)
-    read_plms_parameter(parser)
-    read_dpm_solver_parameter(parser)
+    read_sampler(parser)
     read_laion400m_parameter(parser)
     read_fixed_code_parameter(parser)
     read_ddim_eta_parameter(parser)
@@ -396,7 +405,7 @@ def main():
     read_resize_factor_parameter(parser)
     
     opt = parser.parse_args()
-
+    
     if opt.laion400m:
         print("Falling back to LAION 400M model...")
         opt.config = "configs/latent-diffusion/txt2img-1p4B-eval.yaml"
@@ -415,10 +424,14 @@ def main():
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     model = model.to(device)
 
-    if opt.dpm_solver:
+    if opt.sampler=="DPMS":
         sampler = DPMSolverSampler(model)
-    elif opt.plms:
+    elif opt.sampler=="PLMS":
         sampler = PLMSSampler(model)
+    elif opt.sampler=="DDIM":
+        sampler = DDIMSampler(model)
+    elif opt.sampler in k_diffusion:
+        sampler = KSampler(model,opt.sampler)
     else:
         sampler = DDIMSampler(model)
 
