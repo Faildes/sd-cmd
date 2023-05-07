@@ -1,6 +1,7 @@
 import argparse, os, sys, glob
 import cv2
 import torch
+import safetensors.torch
 import numpy as np
 from omegaconf import OmegaConf
 from PIL import Image
@@ -48,7 +49,12 @@ def numpy_to_pil(images):
 
 def load_model_from_config(config, ckpt, verbose=False):
     print(f"Loading model from {ckpt}")
-    pl_sd = torch.load(ckpt, map_location="cpu")
+    _, extension = os.path.splitext(ckpt)
+    if extension.lower() == ".safetensors":
+        device = "cpu"
+        pl_sd = safetensors.torch.load_file(ckpt, device=device)
+    else:
+        pl_sd = torch.load(ckpt, map_location="cpu")
     if "global_step" in pl_sd:
         print(f"Global Step: {pl_sd['global_step']}")
     sd = pl_sd["state_dict"]
@@ -221,7 +227,7 @@ def main():
         help="path to config which constructs model",
     )
     parser.add_argument(
-        "--ckpt",
+        "--model",
         type=str,
         default="models/ldm/stable-diffusion-v1/model.ckpt",
         help="path to checkpoint of model",
@@ -244,13 +250,13 @@ def main():
     if opt.laion400m:
         print("Falling back to LAION 400M model...")
         opt.config = "configs/latent-diffusion/txt2img-1p4B-eval.yaml"
-        opt.ckpt = "models/ldm/text2img-large/model.ckpt"
+        opt.model = "models/ldm/text2img-large/model.ckpt"
         opt.outdir = "outputs/txt2img-samples-laion400m"
 
     seed_everything(opt.seed)
 
     config = OmegaConf.load(f"{opt.config}")
-    model = load_model_from_config(config, f"{opt.ckpt}")
+    model = load_model_from_config(config, f"{opt.model}")
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     model = model.to(device)
