@@ -3,10 +3,11 @@ import cv2
 import torch
 import safetensors.torch
 import numpy as np
+import random
 from omegaconf import OmegaConf
 from PIL import Image
 from tqdm import tqdm, trange
-from imwatermark import WatermarkEncoder
+#from imwatermark import WatermarkEncoder
 from itertools import islice
 from einops import rearrange
 from torchvision.utils import make_grid
@@ -20,14 +21,14 @@ from ldm.models.diffusion.ddim import DDIMSampler
 from ldm.models.diffusion.plms import PLMSSampler
 from ldm.models.diffusion.dpm_solver import DPMSolverSampler
 
-from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
+#from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
 from transformers import AutoFeatureExtractor
 
 
 # load safety model
-safety_model_id = "CompVis/stable-diffusion-safety-checker"
-safety_feature_extractor = AutoFeatureExtractor.from_pretrained(safety_model_id)
-safety_checker = StableDiffusionSafetyChecker.from_pretrained(safety_model_id)
+#safety_model_id = "CompVis/stable-diffusion-safety-checker"
+#safety_feature_extractor = AutoFeatureExtractor.from_pretrained(safety_model_id)
+#safety_checker = StableDiffusionSafetyChecker.from_pretrained(safety_model_id)
 
 
 def chunk(it, size):
@@ -46,6 +47,50 @@ def numpy_to_pil(images):
 
     return pil_images
 
+checkpoint_dict_replacements = {
+    'cond_stage_model.transformer.embeddings.': 'cond_stage_model.transformer.text_model.embeddings.',
+    'cond_stage_model.transformer.encoder.': 'cond_stage_model.transformer.text_model.encoder.',
+    'cond_stage_model.transformer.final_layer_norm.': 'cond_stage_model.transformer.text_model.final_layer_norm.',
+}
+
+checkpoint_dict_skip_on_merge = ["cond_stage_model.transformer.text_model.embeddings.position_ids"]
+
+def transform_checkpoint_dict_key(k):
+  for text, replacement in checkpoint_dict_replacements.items():
+      if k.startswith(text):
+          k = replacement + k[len(text):]
+
+  return k
+
+def get_state_dict_from_checkpoint(pl_sd):
+  pl_sd = pl_sd.pop("state_dict", pl_sd)
+  pl_sd.pop("state_dict", None)
+
+  sd = {}
+  for k, v in pl_sd.items():
+      new_key = transform_checkpoint_dict_key(k)
+
+      if new_key is not None:
+          sd[new_key] = v
+
+  pl_sd.clear()
+  pl_sd.update(sd)
+
+  return pl_sd
+
+def read_state_dict(checkpoint_file, print_global_state=False, map_location=None):
+  _, extension = os.path.splitext(checkpoint_file)
+  if extension.lower() == ".safetensors":
+      device = map_location
+      pl_sd = safetensors.torch.load_file(checkpoint_file, device=device)
+  else:
+      pl_sd = torch.load(checkpoint_file, map_location=map_location)
+
+  if print_global_state and "global_step" in pl_sd:
+      print(f"Global Step: {pl_sd['global_step']}")
+
+  sd = get_state_dict_from_checkpoint(pl_sd)
+  return sd
 
 def load_model_from_config(config, ckpt, verbose=False):
     print(f"Loading model from {ckpt}")
@@ -57,7 +102,7 @@ def load_model_from_config(config, ckpt, verbose=False):
         pl_sd = torch.load(ckpt, map_location="cpu")
     if "global_step" in pl_sd:
         print(f"Global Step: {pl_sd['global_step']}")
-    sd = pl_sd["state_dict"]
+    sd = read_state_dict(ckpt, map_location="cpu")
     model = instantiate_from_config(config.model)
     m, u = model.load_state_dict(sd, strict=False)
     if len(m) > 0 and verbose:
@@ -72,12 +117,12 @@ def load_model_from_config(config, ckpt, verbose=False):
     return model
 
 
-def put_watermark(img, wm_encoder=None):
-    if wm_encoder is not None:
-        img = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
-        img = wm_encoder.encode(img, 'dwtDct')
-        img = Image.fromarray(img[:, :, ::-1])
-    return img
+#def put_watermark(img, wm_encoder=None):
+#    if wm_encoder is not None:
+#        img = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
+#        img = wm_encoder.encode(img, 'dwtDct')
+#        img = Image.fromarray(img[:, :, ::-1])
+#    return img
 
 
 def load_replacement(x):
@@ -89,17 +134,6 @@ def load_replacement(x):
         return y
     except Exception:
         return x
-
-
-def check_safety(x_image):
-    safety_checker_input = safety_feature_extractor(numpy_to_pil(x_image), return_tensors="pt")
-    x_checked_image, has_nsfw_concept = safety_checker(images=x_image, clip_input=safety_checker_input.pixel_values)
-    assert x_checked_image.shape[0] == len(has_nsfw_concept)
-    for i in range(len(has_nsfw_concept)):
-        if has_nsfw_concept[i]:
-            x_checked_image[i] = load_replacement(x_checked_image[i])
-    return x_checked_image, has_nsfw_concept
-
 
 def main():
     parser = argparse.ArgumentParser()
@@ -235,7 +269,7 @@ def main():
     parser.add_argument(
         "--seed",
         type=int,
-        default=42,
+        default=-1,
         help="the seed (for reproducible sampling)",
     )
     parser.add_argument(
@@ -252,11 +286,15 @@ def main():
         opt.config = "configs/latent-diffusion/txt2img-1p4B-eval.yaml"
         opt.model = "models/ldm/text2img-large/model.ckpt"
         opt.outdir = "outputs/txt2img-samples-laion400m"
-
+    if opt.seed == -1:
+      seed_f = int(random.randrange(4294967294))
+    else:
+      seed_f = opt.seed
     seed_everything(opt.seed)
 
     config = OmegaConf.load(f"{opt.config}")
     model = load_model_from_config(config, f"{opt.model}")
+    model = model.half()
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
     model = model.to(device)
@@ -271,10 +309,10 @@ def main():
     os.makedirs(opt.outdir, exist_ok=True)
     outpath = opt.outdir
 
-    print("Creating invisible watermark encoder (see https://github.com/ShieldMnt/invisible-watermark)...")
-    wm = "StableDiffusionV1"
-    wm_encoder = WatermarkEncoder()
-    wm_encoder.set_watermark('bytes', wm.encode('utf-8'))
+    #print("Creating invisible watermark encoder (see https://github.com/ShieldMnt/invisible-watermark)...")
+    #wm = "StableDiffusionV1"
+    #wm_encoder = WatermarkEncoder()
+    #wm_encoder.set_watermark('bytes', wm.encode('utf-8'))
 
     batch_size = opt.n_samples
     n_rows = opt.n_rows if opt.n_rows > 0 else batch_size
@@ -330,16 +368,16 @@ def main():
                         x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
                         x_samples_ddim = x_samples_ddim.cpu().permute(0, 2, 3, 1).numpy()
 
-                        x_checked_image = check_safety(x_samples_ddim)
+                      
 
-                        x_checked_image_torch = torch.from_numpy(x_checked_image).permute(0, 3, 1, 2)
+                        x_checked_image_torch = torch.from_numpy(x_samples_ddim).permute(0, 3, 1, 2)
 
                         if not opt.skip_save:
                             for x_sample in x_checked_image_torch:
                                 x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
                                 img = Image.fromarray(x_sample.astype(np.uint8))
-                                img = put_watermark(img, wm_encoder)
-                                img.save(os.path.join(sample_path, f"{base_count:05}.png"))
+                                #img = put_watermark(img, wm_encoder)
+                                img.save(os.path.join(sample_path, f"{base_count:08}_{seed_f}.png"))
                                 base_count += 1
 
                         if not opt.skip_grid:
@@ -354,7 +392,7 @@ def main():
                     # to image
                     grid = 255. * rearrange(grid, 'c h w -> h w c').cpu().numpy()
                     img = Image.fromarray(grid.astype(np.uint8))
-                    img = put_watermark(img, wm_encoder)
+                    #img = put_watermark(img, wm_encoder)
                     img.save(os.path.join(outpath, f'grid-{grid_count:04}.png'))
                     grid_count += 1
 
