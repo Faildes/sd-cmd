@@ -15,7 +15,7 @@ import time
 from pytorch_lightning import seed_everything
 from torch import autocast
 from contextlib import contextmanager, nullcontext
-
+from scripts.sd_utils import KDiffusionSampler
 from ldm.util import instantiate_from_config
 from ldm.models.diffusion.ddim import DDIMSampler
 from ldm.models.diffusion.plms import PLMSSampler
@@ -431,7 +431,7 @@ def main():
     elif opt.sampler=="DDIM":
         sampler = DDIMSampler(model)
     elif opt.sampler in k_diffusion:
-        sampler = KSampler(model,opt.sampler)
+        sampler = KDiffusionSampler(model,opt.sampler)
     else:
         sampler = DDIMSampler(model)
 
