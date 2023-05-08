@@ -36,7 +36,7 @@ sampler_extra_params = {
     'sample_heun': ['s_churn', 's_tmin', 's_tmax', 's_noise'],
     'sample_dpm_2': ['s_churn', 's_tmin', 's_tmax', 's_noise'],
 }
-
+    
 class CFGDenoiser(nn.Module):
     def __init__(self, model):
         super().__init__()
@@ -69,4 +69,4 @@ class KDiffusionSampler:
         samples_ddim = None
         samples_ddim = K.sampling.__dict__[f'sample_{self.schedule}'](model_wrap_cfg, x, sigmas,
                                                                               extra_args={'cond': conditioning, 'uncond': unconditional_conditioning,
-                                                                                          'cond_scale': unconditional_guidance_scale}, disable=False, callback=None)
+                                                                                          'cond_scale': unconditional_guidance_scale}, disable=False, callback=img_callback)
