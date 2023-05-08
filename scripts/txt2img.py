@@ -512,11 +512,11 @@ def main():
                                 img = Image.fromarray(x_sample.astype(np.uint8))
                                 #img = put_watermark(img, wm_encoder)
                                 img.save(os.path.join(sample_path, f"{base_count:08}_{seed_f}.png"))
-                                resize_image(os.path.join(sample_path, f"original\\{base_count:05}.png")
-                                             , os.path.join(sample_path, f"resized\\{base_count:05}.png")
-                                             , opt.W, opt.H, opt.resize_factor)
-                                improve_image(os.path.join(sample_path, f"resized\\{base_count:05}.png")
-                                              , os.path.join(sample_path, f"improved\\{base_count:05}.png"))
+                                #resize_image(os.path.join(sample_path, f"original\\{base_count:05}.png")
+                                             #, os.path.join(sample_path, f"resized\\{base_count:05}.png")
+                                             #, opt.W, opt.H, opt.resize_factor)
+                                #improve_image(os.path.join(sample_path, f"resized\\{base_count:05}.png")
+                                              #, os.path.join(sample_path, f"improved\\{base_count:05}.png"))
                                 base_count += 1
 
                         if not opt.skip_grid:
