@@ -1,5 +1,8 @@
 import k_diffusion as K
-
+from collections import namedtuple
+from numpy import kaiser
+import torch.nn as nn
+import torch
 samplers_k_diffusion = [
     ('Euler a', 'sample_euler_ancestral', ['k_euler_a', 'k_euler_ancestral'], {}),
     ('Euler', 'sample_euler', ['k_euler'], {}),
@@ -50,15 +53,20 @@ class KDiffusionSampler:
     def __init__(self, m, sampler):
         self.model = m
         self.model_wrap = K.external.CompVisDenoiser(m)
-        self.extra_params = sampler_extra_params.get(funcname, [])
+        self.extra_params = sampler_extra_params.get(sampler, [])
         self.schedule = sampler
     def get_sampler_name(self):
         return self.schedule
     def sample(self, S, conditioning, batch_size, shape, verbose, unconditional_guidance_scale, unconditional_conditioning, eta, x_T, img_callback=None, log_every_t=None):
-        sigmas = self.model_wrap.get_sigmas(S)
+        if self.schedule.endswith("_ka"):
+          sigma_min, sigma_max = (self.model_wrap.sigmas[0].item(), self.model_wrap.sigmas[-1].item())
+          sigmas = K.sampling.get_sigmas_karras(n=S, sigma_min=sigma_min, sigma_max=sigma_max, device=torch.device("cuda"))
+          self.schedule = self.schedule[:-3]
+        else:
+          sigmas = self.model_wrap.get_sigmas(S)
         x = x_T * sigmas[0]
         model_wrap_cfg = CFGDenoiser(self.model_wrap)
         samples_ddim = None
         samples_ddim = K.sampling.__dict__[f'sample_{self.schedule}'](model_wrap_cfg, x, sigmas,
                                                                               extra_args={'cond': conditioning, 'uncond': unconditional_conditioning,
-                                                                                          'cond_scale': unconditional_guidance_scale}, disable=False, callback=generation_callback)
+                                                                                          'cond_scale': unconditional_guidance_scale}, disable=False, callback=None)
