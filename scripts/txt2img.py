@@ -31,8 +31,8 @@ from transformers import AutoFeatureExtractor
 #safety_checker = StableDiffusionSafetyChecker.from_pretrained(safety_model_id)
 
 k_diffusion = [
-    'Euler a', 'Euler','LMS', 'Heun', 'DPM2', 'DPM2 a', 'DPM++ 2S a', 'DPM++ 2M', 'DPM++ SDE',
-    'DPM fast', 'DPM adaptive', 'LMS Karras', 'DPM2 Karras', 'DPM2 a Karras', 'DPM++ 2S a Karras', 'DPM++ 2M Karras', 'DPM++ SDE Karras', 
+    'k_euler_a', 'k_euler','k_lms', 'k_heun', 'k_dpm_2', 'k_dpm_2_a', 'k_dpmpp_2s_a', 'k_dpmpp_2m', 'k_dpmpp_sde',
+    'k_dpm_fast', 'k_dpm_ad', 'k_lms_ka', 'k_dpm_2_ka', 'k_dpm_2_a_ka', 'k_dpmpp_2s_a_ka', 'k_dpmpp_2m_ka', 'k_dpmpp_sde_ka', 
 ]
 def chunk(it, size):
     it = iter(it)
