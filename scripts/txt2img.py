@@ -31,8 +31,8 @@ from transformers import AutoFeatureExtractor
 #safety_checker = StableDiffusionSafetyChecker.from_pretrained(safety_model_id)
 
 k_diffusion = [
-    'k_euler_a', 'k_euler','k_lms', 'k_heun', 'k_dpm_2', 'k_dpm_2_a', 'k_dpmpp_2s_a', 'k_dpmpp_2m', 'k_dpmpp_sde',
-    'k_dpm_fast', 'k_dpm_ad', 'k_lms_ka', 'k_dpm_2_ka', 'k_dpm_2_a_ka', 'k_dpmpp_2s_a_ka', 'k_dpmpp_2m_ka', 'k_dpmpp_sde_ka', 
+    'euler_a', 'euler','lms', 'heun', 'dpm_2', 'dpm_2_a', 'dpmpp_2s_a', 'dpmpp_2m', 'dpmpp_sde',
+    'dpm_fast', 'dpm_ad', 'lms_ka', 'dpm_2_ka', 'dpm_2_a_ka', 'dpmpp_2s_a_ka', 'dpmpp_2m_ka', 'dpmpp_sde_ka', 
 ]
 def chunk(it, size):
     it = iter(it)
@@ -343,7 +343,7 @@ def read_config_parameter(parser):
 
 def read_ckpt_parameter(parser):
     parser.add_argument(
-        "--ckpt",
+        "--model",
         type=str,
         default="models/ldm/stable-diffusion-v1/model.ckpt",
         help="path to checkpoint of model",
@@ -354,8 +354,7 @@ def read_seed_parameter(parser):
     parser.add_argument(
         "--seed",
         type=int,
-        default=42,
-        default=randint(1, 4294967295),
+        default=random.randint(1, 4294967295),
         help="the seed (for reproducible sampling)",
     )
 
