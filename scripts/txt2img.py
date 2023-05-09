@@ -187,6 +187,21 @@ def improve_image(source_image, destination_image):
     image_improved = cv2.edgePreservingFilter(image_improved, flags=1, sigma_s=60, sigma_r=0.3)
     cv2.imwrite(destination_image, image_improved)
 
+def merge_prompts(style_prompt: str, prompt: str) -> str:
+    if "{prompt}" in style_prompt:
+        res = style_prompt.replace("{prompt}", prompt)
+    else:
+        parts = filter(None, (prompt.strip(), style_prompt.strip()))
+        res = ", ".join(parts)
+
+    return res
+
+def apply_styles_to_prompt(prompt, styles):
+    for style in styles:
+        prompt = merge_prompts(style, prompt)
+
+    return prompt
+
 def read_prompt_parameter(parser):
     parser.add_argument(
         "--prompt",
@@ -404,6 +419,13 @@ def read_precision_parameter(parser):
         default="autocast"
     )
 
+def read_quantize(parser):
+    parser.add_argument(
+        "--quantize",
+        action='store_true',
+        help="quantize",
+    )
+
 def read_resize_factor_parameter(parser):
     parser.add_argument(
         "--resize_factor",
@@ -428,6 +450,7 @@ def main():
     read_height_parameter(parser)
     read_width_parameter(parser)
     read_latent_channels_parameter(parser)
+    read_quantize(parser)
     read_downsampling_factor_parameter(parser)
     read_n_samples_parameter(parser)
     read_n_rows_parameter(parser)
@@ -469,7 +492,7 @@ def main():
     elif opt.sampler=="DDIM":
         sampler = DDIMSampler(model)
     elif opt.sampler in k_diffusion:
-        model_wrap = K.external.CompVisDenoiser(model)
+        model_wrap = K.external.CompVisVDenoiser(model, quantize=opt.quantize) if model.parameterization == "v" else K.external.CompVisDenoiser(model, quantize=opt.quantize)
         sigma_min, sigma_max = model_wrap.sigmas[0].item(), model_wrap.sigmas[-1].item()
         k_d = True
     else:
@@ -529,18 +552,37 @@ def main():
                         c = model.get_learned_conditioning(prompts)
                         shape = [opt.C, opt.H // opt.f, opt.W // opt.f]
                         if k_d:
+                            extra_params_kwargs = {}
+                            def create_noise_sampler(x, sigmas, opt):
+                                from k_diffusion.sampling import BrownianTreeNoiseSampler
+                                sigma_min, sigma_max = sigmas[sigmas > 0].min(), sigmas.max()
+                                if type(opt.prompt) == list:
+                                    all_prompts = opt.prompt
+                                else:
+                                    all_prompts = opt.n_samples * opt.n_iter * [opt.prompt]
+                                if type(opt.seed) == list:
+                                    all_seeds = opt.seed
+                                else:
+                                    all_seeds = [int(opt.seed) + range(len(all_prompts))]
+                                current_iter_seeds = all_seeds[n * opt.n_samples:(n + 1) * opt.n_samples]
+                                return BrownianTreeNoiseSampler(x, sigma_min, sigma_max, seed=current_iter_seeds)
                             if opt.sampler.endswith("_ka"):
                                 sigmas = K.sampling.get_sigmas_karras(opt.ddim_steps, sigma_min, sigma_max, device=device)
                                 opt.sampler = opt.sampler[:-3]
                                 karras = True
                             else:
                                 sigmas = model_wrap.get_sigmas(opt.ddim_steps)
+                            if "dpm_2" in opt.sampler:
+                                sigmas = torch.cat([sigmas[:-2], sigmas[-1:]])
+                            if "dpmpp_sde" in opt.sampler:
+                                noise_sampler = create_noise_sampler(x, sigmas, opt)
+                                extra_params_kwargs['noise_sampler'] = noise_sampler
                             torch.manual_seed(opt.seed) # changes manual seeding procedure
                             x = torch.randn([opt.n_samples, *shape], device=device) * sigmas[0] # for GPU draw
                             # x = torch.randn([opt.n_samples, *shape]).to(device) * sigmas[0] # for CPU draw
                             model_wrap_cfg = CFGDenoiser(model_wrap)
                             extra_args = {'cond': c, 'uncond': uc, 'cond_scale': opt.scale}
-                            samples_ddim = K.sampling.__dict__[f'sample_{opt.sampler}'](model_wrap_cfg, x, sigmas, extra_args=extra_args, disable=not accelerator.is_main_process)
+                            samples_ddim = K.sampling.__dict__[f'sample_{opt.sampler}'](model_wrap_cfg, x, sigmas, extra_args=extra_args, disable=not accelerator.is_main_process **extra_params_kwargs)
                             if karras:
                                 opt.sampler = opt.sampler + "_ka"
                                 karras = False
