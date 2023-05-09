@@ -581,6 +581,7 @@ def main():
                             # x = torch.randn([opt.n_samples, *shape]).to(device) * sigmas[0] # for CPU draw
                             model_wrap_cfg = CFGDenoiser(model_wrap)
                             extra_args = {'cond': c,  'uncond': uc, 'cond_scale': opt.scale}
+                            
                             samples_ddim = K.sampling.__dict__[f'sample_{opt.sampler}'](model_wrap_cfg, x, sigmas, extra_args=extra_args, disable=not accelerator.is_main_process, **extra_params_kwargs)
                             if karras:
                                 opt.sampler = opt.sampler + "_ka"
@@ -604,12 +605,12 @@ def main():
                             for x_sample in x_samples_ddim:
                                 x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
                                 x_sample = x_sample.astype(np.uint8)
-                                img = Image.fromarray(x_sample.astype(np.uint8)).save(os.path.join(sample_path, f"{base_count:08}_{seed_f}.png"))
-                                #resize_image(os.path.join(sample_path, f"original\\{base_count:05}.png")
-                                             #, os.path.join(sample_path, f"resized\\{base_count:05}.png")
-                                             #, opt.W, opt.H, opt.resize_factor)
-                                #improve_image(os.path.join(sample_path, f"resized\\{base_count:05}.png")
-                                              #, os.path.join(sample_path, f"improved\\{base_count:05}.png"))
+                                img = Image.fromarray(x_sample.astype(np.uint8)).save(os.path.join(sample_path, f"original\\{base_count:08}_{seed_f}.png"))
+                                resize_image(os.path.join(sample_path, f"original\\{base_count:08}_{seed_f}.png")
+                                             , os.path.join(sample_path, f"resized\\{base_count:08}_{seed_f}.png")
+                                             , opt.W, opt.H, opt.resize_factor)
+                                improve_image(os.path.join(sample_path, f"resized\\{base_count:08}_{seed_f}.png")
+                                              , os.path.join(sample_path, f"improved\\{base_count:08}_{seed_f}.png"))
                                 base_count += 1
 
                         if accelerator.is_main_process and not opt.skip_grid:
