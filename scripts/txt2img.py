@@ -540,7 +540,7 @@ def main():
             with model.ema_scope():
                 tic = time.time()
                 all_samples = list()
-                for n in trange(opt.n_iter, desc="Sampling" disable =not accelerator.is_main_process):
+                for n in trange(opt.n_iter, desc="Sampling", disable =not accelerator.is_main_process):
                     for prompts in tqdm(data, desc="data", disable =not accelerator.is_main_process):
                         uc = None
                         if negative_prompt:
@@ -563,7 +563,7 @@ def main():
                                 if type(opt.seed) == list:
                                     all_seeds = opt.seed
                                 else:
-                                    all_seeds = [int(opt.seed) + range(len(all_prompts))]
+                                    all_seeds = [int(opt.seed) + a for a in range(len(all_prompts))]
                                 current_iter_seeds = all_seeds[n * opt.n_samples:(n + 1) * opt.n_samples]
                                 return BrownianTreeNoiseSampler(x, sigma_min, sigma_max, seed=current_iter_seeds)
                             if opt.sampler.endswith("_ka"):
@@ -574,15 +574,15 @@ def main():
                                 sigmas = model_wrap.get_sigmas(opt.ddim_steps)
                             if "dpm_2" in opt.sampler:
                                 sigmas = torch.cat([sigmas[:-2], sigmas[-1:]])
+                            torch.manual_seed(opt.seed) # changes manual seeding procedure
+                            x = torch.randn([opt.n_samples, *shape], device=device) * sigmas[0] # for GPU draw
                             if "dpmpp_sde" in opt.sampler:
                                 noise_sampler = create_noise_sampler(x, sigmas, opt)
                                 extra_params_kwargs['noise_sampler'] = noise_sampler
-                            torch.manual_seed(opt.seed) # changes manual seeding procedure
-                            x = torch.randn([opt.n_samples, *shape], device=device) * sigmas[0] # for GPU draw
                             # x = torch.randn([opt.n_samples, *shape]).to(device) * sigmas[0] # for CPU draw
                             model_wrap_cfg = CFGDenoiser(model_wrap)
                             extra_args = {'cond': c, 'uncond': uc, 'cond_scale': opt.scale}
-                            samples_ddim = K.sampling.__dict__[f'sample_{opt.sampler}'](model_wrap_cfg, x, sigmas, extra_args=extra_args, disable=not accelerator.is_main_process **extra_params_kwargs)
+                            samples_ddim = K.sampling.__dict__[f'sample_{opt.sampler}'](model_wrap_cfg, x, sigmas, extra_args=extra_args, disable=not accelerator.is_main_process, **extra_params_kwargs)
                             if karras:
                                 opt.sampler = opt.sampler + "_ka"
                                 karras = False
