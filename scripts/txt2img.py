@@ -517,8 +517,8 @@ def main():
             with model.ema_scope():
                 tic = time.time()
                 all_samples = list()
-                for n in trange(opt.n_iter, desc="Sampling"):
-                    for prompts in tqdm(data, desc="data"):
+                for n in trange(opt.n_iter, desc="Sampling" disable =not accelerator.is_main_process):
+                    for prompts in tqdm(data, desc="data", disable =not accelerator.is_main_process):
                         uc = None
                         if negative_prompt:
                             uc = model.get_learned_conditioning(batch_size * [negative_prompt])
@@ -553,8 +553,7 @@ def main():
                                                              unconditional_guidance_scale=opt.scale,
                                                              unconditional_conditioning=uc,
                                                              eta=opt.ddim_eta,
-                                                             x_T=start_code,
-                                                             dynamic_threshold=opt.dyn)
+                                                             x_T=start_code)
 
                         x_samples_ddim = model.decode_first_stage(samples_ddim)
                         x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
