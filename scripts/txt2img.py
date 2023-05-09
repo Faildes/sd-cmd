@@ -1,6 +1,7 @@
 import argparse, os, sys, glob
 import cv2
 import torch
+import torch.nn as nn
 import safetensors.torch
 import numpy as np
 import random
@@ -15,6 +16,9 @@ import time
 from pytorch_lightning import seed_everything
 from torch import autocast
 from contextlib import contextmanager, nullcontext
+import accelerate
+import k_diffusion as K
+
 from ldm.util import instantiate_from_config
 from ldm.models.diffusion.ddim import DDIMSampler
 from ldm.models.diffusion.plms import PLMSSampler
@@ -49,6 +53,27 @@ def numpy_to_pil(images):
 
     return pil_images
 
+class CFGMaskedDenoiser(nn.Module):
+    def __init__(self, model):
+        super().__init__()
+        self.inner_model = model
+
+    def forward(self, x, sigma, uncond, cond, cond_scale, mask, x0, xi):
+        x_in = x
+        x_in = torch.cat([x_in] * 2)
+        sigma_in = torch.cat([sigma] * 2)
+        cond_in = torch.cat([uncond, cond])
+        uncond, cond = self.inner_model(x_in, sigma_in, cond=cond_in).chunk(2)
+        denoised = uncond + (cond - uncond) * cond_scale
+
+        if mask is not None:
+            assert x0 is not None
+            img_orig = x0
+            mask_inv = 1. - mask
+            denoised = (img_orig * mask_inv) + (mask * denoised)
+
+        return denoised
+        
 class CFGDenoiser(nn.Module):
     def __init__(self, model):
         super().__init__()
@@ -432,6 +457,7 @@ def main():
     model = model.half()
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    accelerator = accelerate.Accelerator()
     model = model.to(device)
     k_d = False
     karras = False
@@ -443,7 +469,6 @@ def main():
     elif opt.sampler=="DDIM":
         sampler = DDIMSampler(model)
     elif opt.sampler in k_diffusion:
-        sampler = KDiffusionSampler(model,opt.sampler)
         model_wrap = K.external.CompVisDenoiser(model)
         sigma_min, sigma_max = model_wrap.sigmas[0].item(), model_wrap.sigmas[-1].item()
         k_d = True
@@ -528,21 +553,17 @@ def main():
                                                              unconditional_guidance_scale=opt.scale,
                                                              unconditional_conditioning=uc,
                                                              eta=opt.ddim_eta,
-                                                             x_T=start_code)
+                                                             x_T=start_code,
+                                                             dynamic_threshold=opt.dyn)
 
                         x_samples_ddim = model.decode_first_stage(samples_ddim)
                         x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
-                        x_samples_ddim = x_samples_ddim.cpu().permute(0, 2, 3, 1).numpy()
+                        x_samples_ddim = accelerator.gather(x_samples_ddim) 
 
-                      
-
-                        x_checked_image_torch = torch.from_numpy(x_samples_ddim).permute(0, 3, 1, 2)
-
-                        if not opt.skip_save:
-                            for x_sample in x_checked_image_torch:
+                        if accelerator.is_main_process and not opt.skip_save:
+                            for x_sample in x_samples_ddim:
                                 x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
                                 img = Image.fromarray(x_sample.astype(np.uint8))
-                                #img = put_watermark(img, wm_encoder)
                                 img.save(os.path.join(sample_path, f"{base_count:08}_{seed_f}.png"))
                                 #resize_image(os.path.join(sample_path, f"original\\{base_count:05}.png")
                                              #, os.path.join(sample_path, f"resized\\{base_count:05}.png")
@@ -551,10 +572,10 @@ def main():
                                               #, os.path.join(sample_path, f"improved\\{base_count:05}.png"))
                                 base_count += 1
 
-                        if not opt.skip_grid:
-                            all_samples.append(x_checked_image_torch)
+                        if accelerator.is_main_process and not opt.skip_grid:
+                            all_samples.append(x_samples_ddim)
 
-                if not opt.skip_grid:
+                if accelerator.is_main_process and not opt.skip_grid:
                     # additionally, save as grid
                     grid = torch.stack(all_samples, 0)
                     grid = rearrange(grid, 'n b c h w -> (n b) c h w')
@@ -562,9 +583,7 @@ def main():
 
                     # to image
                     grid = 255. * rearrange(grid, 'c h w -> h w c').cpu().numpy()
-                    img = Image.fromarray(grid.astype(np.uint8))
-                    #img = put_watermark(img, wm_encoder)
-                    img.save(os.path.join(outpath, f'grid-{grid_count:04}.png'))
+                    Image.fromarray(grid.astype(np.uint8)).save(os.path.join(outpath, f'grid-{grid_count:04}.png'))
                     grid_count += 1
 
                 toc = time.time()
