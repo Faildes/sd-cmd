@@ -18,7 +18,7 @@ from torch import autocast
 from contextlib import contextmanager, nullcontext
 import accelerate
 import k_diffusion as K
-from scripts import prompt_parser, styles
+from scripts import prompt_parser
 
 from ldm.util import instantiate_from_config
 from ldm.models.diffusion.ddim import DDIMSampler
