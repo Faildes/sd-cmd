@@ -1,4 +1,4 @@
-import argparse, os, sys, glob
+import argparse, os, sys, glob, re
 import cv2
 import torch
 import torch.nn as nn
@@ -14,7 +14,7 @@ from einops import rearrange
 from torchvision.utils import make_grid
 import time
 from pytorch_lightning import seed_everything
-from torch import autocast
+from torch import autocast as ac
 from contextlib import contextmanager, nullcontext
 import accelerate
 import k_diffusion as K
@@ -33,6 +33,7 @@ from transformers import AutoFeatureExtractor
 #safety_model_id = "CompVis/stable-diffusion-safety-checker"
 #safety_feature_extractor = AutoFeatureExtractor.from_pretrained(safety_model_id)
 #safety_checker = StableDiffusionSafetyChecker.from_pretrained(safety_model_id)
+prompt_filter_regex = r'[\(\)]|:\d+(\.\d+)?'
 
 k_diffusion = [
     'euler_a', 'euler','lms', 'heun', 'dpm_2', 'dpm_2_a', 'dpmpp_2s_a', 'dpmpp_2m', 'dpmpp_sde',
@@ -58,12 +59,18 @@ class CFGDenoiser(nn.Module):
     def __init__(self, model):
         super().__init__()
         self.inner_model = model
+        self.step = 0
 
     def forward(self, x, sigma, uncond, cond, cond_scale):
-        x_in = torch.cat([x] * 2)
-        sigma_in = torch.cat([sigma] * 2)
-        cond_in = torch.cat([uncond, cond])
+        conds_list, tensor = prompt_parser.reconstruct_multicond_batch(cond, self.step)
+        uncond = prompt_parser.reconstruct_cond_batch(uncond, self.step)
+        batch_size = len(conds_list)
+        repeats = [len(conds_list[i]) for i in range(batch_size)]
+        x_in = torch.cat([torch.stack([x[i] for _ in range(n)]) for i, n in enumerate(repeats)] + [x])
+        sigma_in = torch.cat([torch.stack([sigma[i] for _ in range(n)]) for i, n in enumerate(repeats)] + [sigma])
+        cond_in = torch.cat([uncond, tensor])
         uncond, cond = self.inner_model(x_in, sigma_in, cond=cond_in).chunk(2)
+        self.step += 1
         return uncond + (cond - uncond) * cond_scale
     
 checkpoint_dict_replacements = {
@@ -419,7 +426,7 @@ def main():
     cached_uc = [None, None]
     cached_c = [None, None]
     
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(formatter_class=argparse.RawTextHelpFormatter)
     read_prompt_parameter(parser)
     read_negative_prompt_parameter(parser)
     read_outdir_parameter(parser)
@@ -496,6 +503,14 @@ def main():
     if not opt.from_file:
         prompt = opt.prompt
         negative_prompt = opt.negative_prompt
+        if type(prompt) == list:
+            all_prompts = prompt
+        else:
+            all_prompts = batch_size * opt.n_iter * [prompt]
+        if type(negative_prompt) == list:
+            all_negative_prompts = negative_prompt
+        else:
+            all_negative_prompts = batch_size * opt.n_iter * [negative_prompt]
         assert prompt is not None
         data = [batch_size * [prompt]]
 
@@ -519,7 +534,7 @@ def main():
     if opt.fixed_code:
         start_code = torch.randn([opt.n_samples, opt.C, opt.H // opt.f, opt.W // opt.f], device=device)
 
-    precision_scope = autocast if opt.precision=="autocast" else nullcontext
+    precision_scope = ac if opt.precision=="autocast" else nullcontext
     with torch.no_grad():
         with precision_scope("cuda"):
             with model.ema_scope():
@@ -529,10 +544,10 @@ def main():
                     if disable:
                         return contextlib.nullcontext()
 
-                    if dtype == torch.float32 or opt.precision == "full":
+                    if opt.precision == "full":
                         return nullcontext()
 
-                    return torch.autocast("cuda")
+                    return ac("cuda")
                 def decode_first_stage(model, x):
                     with autocast():
                         x = model.decode_first_stage(x)
@@ -544,86 +559,83 @@ def main():
                         return cache[1]
 
                     with autocast():
-                        cache[1] = function(opt.model, required_prompts, steps)
+                        cache[1] = function(model, required_prompts, steps)
 
                     cache[0] = (required_prompts, steps)
                     return cache[1]
                 for n in trange(opt.n_iter, desc="Sampling", disable =not accelerator.is_main_process):
-                    for prompts in tqdm(data, desc="data", disable =not accelerator.is_main_process):
-                        uc = None
-                        step_multiplier = 2 if opt.sampler in ['dpmpp_2s_a', 'dpmpp_2s_a_ka', 'dpmpp_sde', 'dpmpp_sde_ka', 'dpm_2', 'dpm_2_a', 'heun'] else 1
-                        if opt.scale != 1.0:
-                            uc = get_conds_with_caching(prompt_parser.get_learned_conditioning, negative_prompts, steps * step_multiplier, cached_uc)
-                        if isinstance(prompts, tuple):
-                            prompts = list(prompts)
-                        c = get_conds_with_caching(prompt_parser.get_multicond_learned_conditioning, prompts, steps * step_multiplier, cached_c)
-                        shape = [opt.C, opt.H // opt.f, opt.W // opt.f]
-                        if k_d:
-                            extra_params_kwargs = {}
-                            def create_noise_sampler(x, sigmas, opt):
-                                from k_diffusion.sampling import BrownianTreeNoiseSampler
-                                sigma_min, sigma_max = sigmas[sigmas > 0].min(), sigmas.max()
-                                if type(opt.prompt) == list:
-                                    all_prompts = opt.prompt
-                                else:
-                                    all_prompts = opt.n_samples * opt.n_iter * [opt.prompt]
-                                if type(opt.seed) == list:
-                                    all_seeds = opt.seed
-                                else:
-                                    all_seeds = [int(opt.seed) + a for a in range(len(all_prompts))]
-                                current_iter_seeds = all_seeds[n * opt.n_samples:(n + 1) * opt.n_samples]
-                                return BrownianTreeNoiseSampler(x, sigma_min, sigma_max, seed=current_iter_seeds)
-                            if opt.sampler.endswith("_ka"):
-                                sigmas = K.sampling.get_sigmas_karras(opt.ddim_steps, sigma_min, sigma_max, device=device)
-                                opt.sampler = opt.sampler[:-3]
-                                karras = True
+                    prompts = all_prompts[n * batch_size:(n + 1) * batch_size]
+                    negative_prompts = all_negative_prompts[n * batch_size:(n + 1) * batch_size]
+                    uc = None
+                    step_multiplier = 2 if opt.sampler in ['dpmpp_2s_a', 'dpmpp_2s_a_ka', 'dpmpp_sde', 'dpmpp_sde_ka', 'dpm_2', 'dpm_2_a', 'heun'] else 1
+                    if opt.scale != 1.0:
+                        uc = get_conds_with_caching(prompt_parser.get_learned_conditioning, negative_prompts, steps * step_multiplier, cached_uc)
+                    if isinstance(prompts, tuple):
+                        prompts = list(prompts)
+                    c = get_conds_with_caching(prompt_parser.get_multicond_learned_conditioning, prompts, steps * step_multiplier, cached_c)
+                    shape = [opt.C, opt.H // opt.f, opt.W // opt.f]
+                    if k_d:
+                        extra_params_kwargs = {}
+                        def create_noise_sampler(x, sigmas, opt):
+                            from k_diffusion.sampling import BrownianTreeNoiseSampler
+                            sigma_min, sigma_max = sigmas[sigmas > 0].min(), sigmas.max()
+                            if type(opt.seed) == list:
+                                all_seeds = opt.seed
                             else:
-                                sigmas = model_wrap.get_sigmas(opt.ddim_steps)
-                            if "dpm_2" in opt.sampler:
-                                sigmas = torch.cat([sigmas[:-2], sigmas[-1:]])
-                            torch.manual_seed(opt.seed) # changes manual seeding procedure
-                            x = torch.randn([opt.n_samples, *shape], device=device) * sigmas[0] # for GPU draw
-                            if "dpmpp_sde" in opt.sampler:
-                                noise_sampler = create_noise_sampler(x, sigmas, opt)
-                                extra_params_kwargs['noise_sampler'] = noise_sampler
-                            # x = torch.randn([opt.n_samples, *shape]).to(device) * sigmas[0] # for CPU draw
-                            model_wrap_cfg = CFGDenoiser(model_wrap)
-                            extra_args = {'cond': c,  'uncond': uc, 'cond_scale': opt.scale}
-                            
-                            samples_ddim = K.sampling.__dict__[f'sample_{opt.sampler}'](model_wrap_cfg, x, sigmas, extra_args=extra_args, disable=not accelerator.is_main_process, **extra_params_kwargs)
-                            if karras:
-                                opt.sampler = opt.sampler + "_ka"
-                                karras = False
+                                all_seeds = [int(opt.seed) + a for a in range(len(all_prompts))]
+                            current_iter_seeds = all_seeds[n * opt.n_samples:(n + 1) * opt.n_samples]
+                            return BrownianTreeNoiseSampler(x, sigma_min, sigma_max, seed=current_iter_seeds)
+                        if opt.sampler.endswith("_ka"):
+                            sigmas = K.sampling.get_sigmas_karras(opt.ddim_steps, sigma_min, sigma_max, device=device)
+                            opt.sampler = opt.sampler[:-3]
+                            karras = True
                         else:
-                            samples_ddim, _ = sampler.sample(S=opt.ddim_steps,
-                                                             conditioning=c,
-                                                             batch_size=opt.n_samples,
-                                                             shape=shape,
-                                                             verbose=False,
-                                                             unconditional_guidance_scale=opt.scale,
-                                                             unconditional_conditioning=uc,
-                                                             eta=opt.ddim_eta,
-                                                             x_T=start_code)
-                        x_samples_ddim = [decode_first_stage(model, samples_ddim[i:i+1].to(dtype=torch.float16))[0].cpu() for i in range(samples_ddim.size(0))]
-                        x_samples_ddim = torch.stack(x_samples_ddim).float()
-                        x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
-                        del samples_ddim
-                        x_samples_ddim = accelerator.gather(x_samples_ddim) 
+                            sigmas = model_wrap.get_sigmas(opt.ddim_steps)
+                        if "dpm_2" in opt.sampler:
+                            sigmas = torch.cat([sigmas[:-2], sigmas[-1:]])
+                        torch.manual_seed(opt.seed) # changes manual seeding procedure
+                        x = torch.randn([opt.n_samples, *shape], device=device) * sigmas[0] # for GPU draw
+                        if "dpmpp_sde" in opt.sampler:
+                            noise_sampler = create_noise_sampler(x, sigmas, opt)
+                            extra_params_kwargs['noise_sampler'] = noise_sampler
+                        # x = torch.randn([opt.n_samples, *shape]).to(device) * sigmas[0] # for CPU draw
+                        model_wrap_cfg = CFGDenoiser(model_wrap)
+                        extra_args = {'cond': c,  'uncond': uc, 'cond_scale': opt.scale}
+                        
+                        samples_ddim = K.sampling.__dict__[f'sample_{opt.sampler}'](model_wrap_cfg, x, sigmas, extra_args=extra_args, disable=not accelerator.is_main_process, **extra_params_kwargs)
+                        if karras:
+                            opt.sampler = opt.sampler + "_ka"
+                            karras = False
+                    else:
+                        samples_ddim, _ = sampler.sample(S=opt.ddim_steps,
+                                                          conditioning=c,
+                                                          batch_size=opt.n_samples,
+                                                          shape=shape,
+                                                          verbose=False,
+                                                          unconditional_guidance_scale=opt.scale,
+                                                          unconditional_conditioning=uc,
+                                                          eta=opt.ddim_eta,
+                                                          x_T=start_code)
+                    x_samples_ddim = [decode_first_stage(model, samples_ddim[i:i+1].to(dtype=torch.float16))[0].cpu() for i in range(samples_ddim.size(0))]
+                    x_samples_ddim = torch.stack(x_samples_ddim).float()
+                    x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
+                    del samples_ddim
+                    x_samples_ddim = accelerator.gather(x_samples_ddim) 
 
-                        if accelerator.is_main_process and not opt.skip_save:
-                            for x_sample in x_samples_ddim:
-                                x_sample = 255. * np.moveaxis(x_sample.cpu().numpy(), 0, 2)
-                                x_sample = x_sample.astype(np.uint8)
-                                img = Image.fromarray(x_sample.astype(np.uint8)).save(os.path.join(sample_path, f"original\\{base_count:08}_{seed_f}.png"))
-                                resize_image(os.path.join(sample_path, f"original\\{base_count:08}_{seed_f}.png")
-                                             , os.path.join(sample_path, f"resized\\{base_count:08}_{seed_f}.png")
-                                             , opt.W, opt.H, opt.resize_factor)
-                                improve_image(os.path.join(sample_path, f"resized\\{base_count:08}_{seed_f}.png")
-                                              , os.path.join(sample_path, f"improved\\{base_count:08}_{seed_f}.png"))
-                                base_count += 1
+                    if accelerator.is_main_process and not opt.skip_save:
+                        for x_sample in x_samples_ddim:
+                            x_sample = 255. * np.moveaxis(x_sample.cpu().numpy(), 0, 2)
+                            x_sample = x_sample.astype(np.uint8)
+                            img = Image.fromarray(x_sample.astype(np.uint8)).save(os.path.join(sample_path, f"original\\{base_count:08}_{seed_f}.png"))
+                            resize_image(os.path.join(sample_path, f"original\\{base_count:08}_{seed_f}.png")
+                                          , os.path.join(sample_path, f"resized\\{base_count:08}_{seed_f}.png")
+                                          , opt.W, opt.H, opt.resize_factor)
+                            improve_image(os.path.join(sample_path, f"resized\\{base_count:08}_{seed_f}.png")
+                                          , os.path.join(sample_path, f"improved\\{base_count:08}_{seed_f}.png"))
+                            base_count += 1
 
-                        if accelerator.is_main_process and not opt.skip_grid:
-                            all_samples.append(x_samples_ddim)
+                    if accelerator.is_main_process and not opt.skip_grid:
+                        all_samples.append(x_samples_ddim)
 
                 if accelerator.is_main_process and not opt.skip_grid:
                     # additionally, save as grid
