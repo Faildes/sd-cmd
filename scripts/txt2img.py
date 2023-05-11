@@ -18,6 +18,7 @@ from torch import autocast
 from contextlib import contextmanager, nullcontext
 import accelerate
 import k_diffusion as K
+from scripts import prompt_parser, styles
 
 from ldm.util import instantiate_from_config
 from ldm.models.diffusion.ddim import DDIMSampler
@@ -413,7 +414,11 @@ def read_resize_factor_parameter(parser):
         default=2
     )
 
+    
 def main():
+    cached_uc = [None, None]
+    cached_c = [None, None]
+    
     parser = argparse.ArgumentParser()
     read_prompt_parameter(parser)
     read_negative_prompt_parameter(parser)
@@ -459,6 +464,7 @@ def main():
     model = model.half()
 
     device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    
     accelerator = accelerate.Accelerator()
     model = model.to(device)
     k_d = False
@@ -484,7 +490,7 @@ def main():
     #wm = "StableDiffusionV1"
     #wm_encoder = WatermarkEncoder()
     #wm_encoder.set_watermark('bytes', wm.encode('utf-8'))
-
+    steps = opt.ddim_steps
     batch_size = opt.n_samples
     n_rows = opt.n_rows if opt.n_rows > 0 else batch_size
     if not opt.from_file:
@@ -519,14 +525,38 @@ def main():
             with model.ema_scope():
                 tic = time.time()
                 all_samples = list()
+                def autocast(disable=False):
+                    if disable:
+                        return contextlib.nullcontext()
+
+                    if dtype == torch.float32 or opt.precision == "full":
+                        return nullcontext()
+
+                    return torch.autocast("cuda")
+                def decode_first_stage(model, x):
+                    with autocast():
+                        x = model.decode_first_stage(x)
+
+                    return x
+                
+                def get_conds_with_caching(function, required_prompts, steps, cache):
+                    if cache[0] is not None and (required_prompts, steps) == cache[0]:
+                        return cache[1]
+
+                    with autocast():
+                        cache[1] = function(opt.model, required_prompts, steps)
+
+                    cache[0] = (required_prompts, steps)
+                    return cache[1]
                 for n in trange(opt.n_iter, desc="Sampling", disable =not accelerator.is_main_process):
                     for prompts in tqdm(data, desc="data", disable =not accelerator.is_main_process):
                         uc = None
+                        step_multiplier = 2 if opt.sampler in ['dpmpp_2s_a', 'dpmpp_2s_a_ka', 'dpmpp_sde', 'dpmpp_sde_ka', 'dpm_2', 'dpm_2_a', 'heun'] else 1
                         if opt.scale != 1.0:
-                            uc = model.get_learned_conditioning(batch_size * [negative_prompt])
+                            uc = get_conds_with_caching(prompt_parser.get_learned_conditioning, negative_prompts, steps * step_multiplier, cached_uc)
                         if isinstance(prompts, tuple):
                             prompts = list(prompts)
-                        c = model.get_learned_conditioning(prompts)
+                        c = get_conds_with_caching(prompt_parser.get_multicond_learned_conditioning, prompts, steps * step_multiplier, cached_c)
                         shape = [opt.C, opt.H // opt.f, opt.W // opt.f]
                         if k_d:
                             extra_params_kwargs = {}
@@ -574,14 +604,15 @@ def main():
                                                              unconditional_conditioning=uc,
                                                              eta=opt.ddim_eta,
                                                              x_T=start_code)
-
-                        x_samples_ddim = model.decode_first_stage(samples_ddim)
+                        x_samples_ddim = [decode_first_stage(model, samples_ddim[i:i+1].to(dtype=torch.float16))[0].cpu() for i in range(samples_ddim.size(0))]
+                        x_samples_ddim = torch.stack(x_samples_ddim).float()
                         x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
+                        del samples_ddim
                         x_samples_ddim = accelerator.gather(x_samples_ddim) 
 
                         if accelerator.is_main_process and not opt.skip_save:
                             for x_sample in x_samples_ddim:
-                                x_sample = 255. * rearrange(x_sample.cpu().numpy(), 'c h w -> h w c')
+                                x_sample = 255. * np.moveaxis(x_sample.cpu().numpy(), 0, 2)
                                 x_sample = x_sample.astype(np.uint8)
                                 img = Image.fromarray(x_sample.astype(np.uint8)).save(os.path.join(sample_path, f"original\\{base_count:08}_{seed_f}.png"))
                                 resize_image(os.path.join(sample_path, f"original\\{base_count:08}_{seed_f}.png")
