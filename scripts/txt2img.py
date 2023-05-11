@@ -60,18 +60,24 @@ class CFGDenoiser(nn.Module):
         super().__init__()
         self.inner_model = model
         self.step = 0
-
     def forward(self, x, sigma, uncond, cond, cond_scale):
-        conds_list, tensor = prompt_parser.reconstruct_multicond_batch(cond, self.step)
-        uncond = prompt_parser.reconstruct_cond_batch(uncond, self.step)
-        batch_size = len(conds_list)
-        repeats = [len(conds_list[i]) for i in range(batch_size)]
-        x_in = torch.cat([torch.stack([x[i] for _ in range(n)]) for i, n in enumerate(repeats)] + [x])
-        sigma_in = torch.cat([torch.stack([sigma[i] for _ in range(n)]) for i, n in enumerate(repeats)] + [sigma])
-        cond_in = torch.cat([uncond, tensor])
+        x_in = torch.cat([x] * 2)
+        sigma_in = torch.cat([sigma] * 2)
+        cond_in = torch.cat([uncond, cond])
         uncond, cond = self.inner_model(x_in, sigma_in, cond=cond_in).chunk(2)
-        self.step += 1
         return uncond + (cond - uncond) * cond_scale
+    #def forward(self, x, sigma, uncond, cond, cond_scale):
+    #    conds_list, tensor = prompt_parser.reconstruct_multicond_batch(cond, self.step)
+    #    uncond = prompt_parser.reconstruct_cond_batch(uncond, self.step)
+    #    batch_size = len(conds_list)
+    #    repeats = [len(conds_list[i]) for i in range(batch_size)]
+    #    x_in = torch.cat([torch.stack([x[i] for _ in range(n)]) for i, n in enumerate(repeats)] + [x])
+    #    sigma_in = torch.cat([torch.stack([sigma[i] for _ in range(n)]) for i, n in enumerate(repeats)] + [sigma])
+    #    cond_in = torch.cat([uncond, tensor])
+    #    uncond, cond = self.inner_model(x_in, sigma_in, cond=cond_in).chunk(2)
+    #    self.step += 1
+    #    return uncond + (cond - uncond) * cond_scale
+
     
 checkpoint_dict_replacements = {
     'cond_stage_model.transformer.embeddings.': 'cond_stage_model.transformer.text_model.embeddings.',
@@ -569,10 +575,12 @@ def main():
                     uc = None
                     step_multiplier = 2 if opt.sampler in ['dpmpp_2s_a', 'dpmpp_2s_a_ka', 'dpmpp_sde', 'dpmpp_sde_ka', 'dpm_2', 'dpm_2_a', 'heun'] else 1
                     if opt.scale != 1.0:
-                        uc = get_conds_with_caching(prompt_parser.get_learned_conditioning, negative_prompts, steps * step_multiplier, cached_uc)
+                        uc = torch.cat([prompt_parser.get_learned_conditioning_with_prompt_weights(nega_pr, model) for nega_pr in negative_prompts])
+                        #uc = get_conds_with_caching(prompt_parser.get_learned_conditioning, negative_prompts, steps * step_multiplier, cached_uc)
                     if isinstance(prompts, tuple):
                         prompts = list(prompts)
-                    c = get_conds_with_caching(prompt_parser.get_multicond_learned_conditioning, prompts, steps * step_multiplier, cached_c)
+                    #c = get_conds_with_caching(prompt_parser.get_multicond_learned_conditioning, prompts, steps * step_multiplier, cached_c)
+                    c = torch.cat([prompt_parser.get_learned_conditioning_with_prompt_weights(pr, model) for pr in prompts])
                     shape = [opt.C, opt.H // opt.f, opt.W // opt.f]
                     if k_d:
                         extra_params_kwargs = {}
