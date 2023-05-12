@@ -2,7 +2,6 @@ import re
 from collections import namedtuple
 from typing import List
 import lark
-prompt_filter_regex = r"[\(\)]|:\d+(\.\d+)?"
 # a prompt like this: "fantasy landscape with a [mountain:lake:0.25] and [an oak:a christmas tree:0.75][ in foreground::0.6][ in background:0.25] [shoddy:masterful:0.5]"
 # will be represented with prompt_schedule like this (assuming steps=100):
 # [25, 'fantasy landscape with a mountain and an oak in foreground shoddy']
@@ -202,7 +201,7 @@ def get_multicond_learned_conditioning(model, prompts, steps) -> MulticondLearne
 
     res_indexes, prompt_flat_list, prompt_indexes = get_multicond_prompt_list(prompts)
 
-    learned_conditioning = get_learned_conditioning(model, prompt_flat_list, steps)
+    learned_conditioning = get_learned_conditioning_with_prompt_weights(model, prompt_flat_list, steps)
 
     res = []
     for indexes in res_indexes:
@@ -382,44 +381,71 @@ def update_conditioning(filtered_whole_prompt, filtered_whole_prompt_c, model, c
     current_prompt_c += (weight - 1.0) * subprompt_contribution_to_c
     return current_prompt_c
 
+prompt_filter_regex = r"[\(\)]|:\d+(\.\d+)?"
+def filtered(prompt):
+    prompt = re.sub(r"(?<!\\)[\[\]]|(?<!\\)[\{\}]|(?<!\\)[\(\)]|:\d+(\.\d+)?", "", prompt)
+    prompt = prompt.replace("\\","")
+    return prompt
 
 def get_learned_conditioning_with_prompt_weights(prompt, model):
-    # Get a filtered prompt without (, ), and :number + conditioning
-    filtered_whole_prompt = re.sub(prompt_filter_regex, "", prompt)
+    res = []
+    round_brackets = []
+    square_brackets = []
+
+    round_bracket_multiplier = 1.1
+    square_bracket_multiplier = 1 / 1.1
+    for m in re_attention.finditer(prompt):
+        text = m.group(0)
+        weight = m.group(1)
+
+        if text.startswith('\\'):
+            res.append([text[1:], 1.0])
+        elif text == '(':
+            round_brackets.append(len(res))
+        elif text == '[':
+            square_brackets.append(len(res))
+        elif weight is not None and len(round_brackets) > 0:
+            multiply_range(round_brackets.pop(), float(weight))
+        elif text == ')' and len(round_brackets) > 0:
+            multiply_range(round_brackets.pop(), round_bracket_multiplier)
+        elif text == ']' and len(square_brackets) > 0:
+            multiply_range(square_brackets.pop(), square_bracket_multiplier)
+        else:
+            parts = re.split(re_break, text)
+            for i, part in enumerate(parts):
+                if i > 0:
+                    res.append(["BREAK", -1])
+                res.append([part, 1.0])
+
+    for pos in round_brackets:
+        multiply_range(pos, round_bracket_multiplier)
+
+    for pos in square_brackets:
+        multiply_range(pos, square_bracket_multiplier)
+
+    if len(res) == 0:
+        res = [["", 1.0]]
+    i = 0
+    while i + 1 < len(res):
+        if res[i][1] == res[i + 1][1]:
+            res[i][0] += res[i + 1][0]
+            res.pop(i + 1)
+        else:
+            i += 1
 
     # Get full prompt embedding vector
+    filtered_whole_prompt = filtered(prompt)
     filtered_whole_prompt_c = model.get_learned_conditioning(filtered_whole_prompt)
     current_prompt_c = filtered_whole_prompt_c
-
-    # Find the first () delimited subprompt
-    subprompt_open_i = prompt.find("(")
-    subprompt_close_i = prompt.find(")", subprompt_open_i + 1)
-
-    # Process the (next) subprompt
-    while subprompt_open_i != -1 and subprompt_close_i != -1:
-        subprompt = prompt[subprompt_open_i + 1 : subprompt_close_i]
-        weight_i = subprompt.find(":")
-        subprompt_wo_weight = subprompt[0:weight_i]
-
-        # Process the weight if we have it
-        if weight_i != -1:
-            weight_str = subprompt[weight_i + 1 :]
-            try:
-                weight_val = float(weight_str)
-                # Update the conditioning with this subprompt and weight
-                current_prompt_c = update_conditioning(
-                    filtered_whole_prompt,
-                    filtered_whole_prompt_c,
-                    model,
-                    current_prompt_c,
-                    subprompt_wo_weight,
-                    weight_val,
-                )
-            except ValueError:
-                pass
-
-        # Find next () delimited subprompt
-        subprompt_open_i = prompt.find("(", subprompt_open_i + 1)
-        subprompt_close_i = prompt.find(")", subprompt_open_i + 1)
-
+    for weighted in res:
+        current_prompt_c = update_conditioning(
+            filtered_whole_prompt,
+            filtered_whole_prompt_c,
+            model,
+            current_prompt_c,
+            weighted[0],
+            weighted[1],
+        )
     return current_prompt_c
+
+
