@@ -394,6 +394,9 @@ def get_learned_conditioning_with_prompt_weights(prompt, model):
 
     round_bracket_multiplier = 1.1
     square_bracket_multiplier = 1 / 1.1
+    def multiply_range(start_position, multiplier):
+        for p in range(start_position, len(res)):
+            res[p][1] *= multiplier
     for m in re_attention.finditer(prompt):
         text = m.group(0)
         weight = m.group(1)
