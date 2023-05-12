@@ -427,7 +427,32 @@ def read_resize_factor_parameter(parser):
         default=2
     )
 
-    
+ 
+class TorchHijack:
+    def __init__(self, sampler_noises):
+        # Using a deque to efficiently receive the sampler_noises in the same order as the previous index-based
+        # implementation.
+        self.sampler_noises = deque(sampler_noises)
+
+    def __getattr__(self, item):
+        if item == 'randn_like':
+            return self.randn_like
+
+        if hasattr(torch, item):
+            return getattr(torch, item)
+
+        raise AttributeError("'{}' object has no attribute '{}'".format(type(self).__name__, item))
+
+    def randn_like(self, x):
+        if self.sampler_noises:
+            noise = self.sampler_noises.popleft()
+            if noise.shape == x.shape:
+                return noise
+
+        if opts.randn_source == "CPU" or x.device.type == 'mps':
+            return torch.randn_like(x, device=devices.cpu).to(x.device)
+        else:
+            return torch.randn_like(x)
 def main():
     cached_uc = [None, None]
     cached_c = [None, None]
@@ -506,6 +531,87 @@ def main():
     steps = opt.ddim_steps
     batch_size = opt.n_samples
     n_rows = opt.n_rows if opt.n_rows > 0 else batch_size
+    sampler_noises = None
+    
+    def slerp(val, low, high):
+        low_norm = low/torch.norm(low, dim=1, keepdim=True)
+        high_norm = high/torch.norm(high, dim=1, keepdim=True)
+        dot = (low_norm*high_norm).sum(1)
+
+        if dot.mean() > 0.9995:
+            return low * val + high * (1 - val)
+
+        omega = torch.acos(dot)
+        so = torch.sin(omega)
+        res = (torch.sin((1.0-val)*omega)/so).unsqueeze(1)*low + (torch.sin(val*omega)/so).unsqueeze(1) * high
+        return res
+    def create_random_tensors(shape, seeds, subseeds=None, subseed_strength=0.0, seed_resize_from_h=0, seed_resize_from_w=0):
+        global sampler_noises
+        eta_noise_seed_delta = opt.ddim_eta or 0
+        xs = []
+
+        # if we have multiple seeds, this means we are working with batch size>1; this then
+        # enables the generation of additional tensors with noise that the sampler will use during its processing.
+        # Using those pre-generated tensors instead of simple torch.randn allows a batch with seeds [100, 101] to
+        # produce the same images as with two batches [100], [101].
+        ase = steps if k_d else 0
+        if len(seeds) > 1:
+            sampler_noises = [[] for _ in range(ase)]
+        else:
+            sampler_noises = None
+
+        for i, seed in enumerate(seeds):
+            noise_shape = shape if seed_resize_from_h <= 0 or seed_resize_from_w <= 0 else (shape[0], seed_resize_from_h//8, seed_resize_from_w//8)
+
+            subnoise = None
+            if subseeds is not None:
+                subseed = 0 if i >= len(subseeds) else subseeds[i]
+                torch.manual_seed(subseed)
+                subnoise = torch.randn(noise_shape, device)
+
+            # randn results depend on device; gpu and cpu get different results for same seed;
+            # the way I see it, it's better to do this on CPU, so that everyone gets same result;
+            # but the original script had it like this, so I do not dare change it for now because
+            # it will break everyone's seeds.
+            torch.manual_seed(seed)
+            noise = torch.randn(noise_shape, device)
+
+            if subnoise is not None:
+                noise = slerp(subseed_strength, noise, subnoise)
+
+            if noise_shape != shape:
+                torch.manual_seed(seed)
+                x = torch.randn(shape, device)
+                dx = (shape[2] - noise_shape[2]) // 2
+                dy = (shape[1] - noise_shape[1]) // 2
+                w = noise_shape[2] if dx >= 0 else noise_shape[2] + 2 * dx
+                h = noise_shape[1] if dy >= 0 else noise_shape[1] + 2 * dy
+                tx = 0 if dx < 0 else dx
+                ty = 0 if dy < 0 else dy
+                dx = max(-dx, 0)
+                dy = max(-dy, 0)
+
+                x[:, ty:ty+h, tx:tx+w] = noise[:, dy:dy+h, dx:dx+w]
+                noise = x
+
+            if sampler_noises is not None:
+                cnt = ase
+
+                if eta_noise_seed_delta > 0:
+                    torch.manual_seed(seed + eta_noise_seed_delta)
+
+                for j in range(cnt):
+                    sampler_noises[j].append(torch.randn(tuple(noise_shape)))
+
+            xs.append(noise)
+
+        if sampler_noises is not None:
+            amber = [torch.stack(n).to(shared.device) for n in sampler_noises]
+            sampler_noises = amber
+
+        x = torch.stack(xs).to(shared.device)
+        return x
+                                    
     if not opt.from_file:
         prompt = opt.prompt
         negative_prompt = opt.negative_prompt
@@ -602,7 +708,9 @@ def main():
                         if "dpm_2" in opt.sampler:
                             sigmas = torch.cat([sigmas[:-2], sigmas[-1:]])
                         torch.manual_seed(opt.seed) # changes manual seeding procedure
-                        x = torch.randn([opt.n_samples, *shape], device=device) * sigmas[0] # for GPU draw
+                        #x = torch.randn([opt.n_samples, *shape], device=device) * sigmas[0] # for GPU draw
+                        x = create_random_tensors(shape, seeds=[seed_f]) * sigmas[0]
+                        k_diffusion.sampling.torch = TorchHijack(sampler_noises if sampler_noises is not None else [])
                         if "dpmpp_sde" in opt.sampler:
                             noise_sampler = create_noise_sampler(x, sigmas, opt)
                             extra_params_kwargs['noise_sampler'] = noise_sampler
