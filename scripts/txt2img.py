@@ -1,4 +1,5 @@
 import argparse, os, sys, glob, re
+from collections import deque
 import cv2
 import torch
 import torch.nn as nn
@@ -448,11 +449,7 @@ class TorchHijack:
             noise = self.sampler_noises.popleft()
             if noise.shape == x.shape:
                 return noise
-
-        if opts.randn_source == "CPU" or x.device.type == 'mps':
-            return torch.randn_like(x, device=devices.cpu).to(x.device)
-        else:
-            return torch.randn_like(x)
+        return torch.randn_like(x)
 def main():
     cached_uc = [None, None]
     cached_c = [None, None]
@@ -545,7 +542,7 @@ def main():
         so = torch.sin(omega)
         res = (torch.sin((1.0-val)*omega)/so).unsqueeze(1)*low + (torch.sin(val*omega)/so).unsqueeze(1) * high
         return res
-    def create_random_tensors(shape, seeds, subseeds=None, subseed_strength=0.0, seed_resize_from_h=0, seed_resize_from_w=0):
+    def create_random_tensors(shape, seeds, subseeds=None, subseed_strength=0.0, seed_resize_from_h=0, seed_resize_from_w=0, device=device):
         global sampler_noises
         eta_noise_seed_delta = opt.ddim_eta or 0
         xs = []
@@ -567,21 +564,21 @@ def main():
             if subseeds is not None:
                 subseed = 0 if i >= len(subseeds) else subseeds[i]
                 torch.manual_seed(subseed)
-                subnoise = torch.randn(noise_shape, device)
+                subnoise = torch.randn(noise_shape, device=device)
 
             # randn results depend on device; gpu and cpu get different results for same seed;
             # the way I see it, it's better to do this on CPU, so that everyone gets same result;
             # but the original script had it like this, so I do not dare change it for now because
             # it will break everyone's seeds.
             torch.manual_seed(seed)
-            noise = torch.randn(noise_shape, device)
+            noise = torch.randn(noise_shape, device=device)
 
             if subnoise is not None:
                 noise = slerp(subseed_strength, noise, subnoise)
 
             if noise_shape != shape:
                 torch.manual_seed(seed)
-                x = torch.randn(shape, device)
+                x = torch.randn(shape, device=device)
                 dx = (shape[2] - noise_shape[2]) // 2
                 dy = (shape[1] - noise_shape[1]) // 2
                 w = noise_shape[2] if dx >= 0 else noise_shape[2] + 2 * dx
@@ -601,15 +598,15 @@ def main():
                     torch.manual_seed(seed + eta_noise_seed_delta)
 
                 for j in range(cnt):
-                    sampler_noises[j].append(torch.randn(tuple(noise_shape)))
+                    sampler_noises[j].append(torch.randn(tuple(noise_shape),device=device))
 
             xs.append(noise)
 
         if sampler_noises is not None:
-            amber = [torch.stack(n).to(shared.device) for n in sampler_noises]
+            amber = [torch.stack(n).to(device) for n in sampler_noises]
             sampler_noises = amber
 
-        x = torch.stack(xs).to(shared.device)
+        x = torch.stack(xs).to(device)
         return x
                                     
     if not opt.from_file:
@@ -710,7 +707,7 @@ def main():
                         torch.manual_seed(opt.seed) # changes manual seeding procedure
                         #x = torch.randn([opt.n_samples, *shape], device=device) * sigmas[0] # for GPU draw
                         x = create_random_tensors(shape, seeds=[seed_f]) * sigmas[0]
-                        k_diffusion.sampling.torch = TorchHijack(sampler_noises if sampler_noises is not None else [])
+                        K.sampling.torch = TorchHijack(sampler_noises if sampler_noises is not None else [])
                         if "dpmpp_sde" in opt.sampler:
                             noise_sampler = create_noise_sampler(x, sigmas, opt)
                             extra_params_kwargs['noise_sampler'] = noise_sampler
