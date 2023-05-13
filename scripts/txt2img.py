@@ -55,15 +55,42 @@ def numpy_to_pil(images):
     pil_images = [Image.fromarray(image) for image in images]
 
     return pil_images
-        
+
+def txt2img_image_conditioning(sd_model, x, width, height, device):
+    if sd_model.conditioning_key in {'hybrid', 'concat'}: # Inpainting models
+
+        # The "masked-image" in this case will just be all zeros since the entire image is masked.
+        image_conditioning = torch.zeros(x.shape[0], 3, height, width, device=device)
+        image_conditioning = sd_model.get_first_stage_encoding(sd_model.encode_first_stage(image_conditioning))
+
+        # Add the fake full 1s mask to the first dimension.
+        image_conditioning = torch.nn.functional.pad(image_conditioning, (0, 0, 0, 0, 1, 0), value=1.0)
+        image_conditioning = image_conditioning.to(x.dtype)
+
+        return image_conditioning
+
+    elif sd_model.model.conditioning_key == "crossattn-adm": # UnCLIP models
+
+        return x.new_zeros(x.shape[0], 2*sd_model.noise_augmentor.time_embed.dim, dtype=x.dtype, device=x.device)
+
+    else:
+        # Dummy zero conditioning if we're not using inpainting or unclip models.
+        # Still takes up a bit of memory, but no encoder call.
+        # Pretty sure we can just make this a 1x1 image since its not going to be used besides its batch size.
+        return x.new_zeros(x.shape[0], 5, 1, 1, dtype=x.dtype, device=x.device)
+    
 class CFGDenoiser(nn.Module):
     def __init__(self, model):
         super().__init__()
         self.inner_model = model
         self.step = 0
     def forward(self, x, sigma, uncond, cond, cond_scale):
+        #image_uncond = image_cond
+        batch_size = len(cond)
+        repeats = [len(cond[i]) for i in range(batch_size)]
         x_in = torch.cat([x] * 2)
         sigma_in = torch.cat([sigma] * 2)
+        #image_cond_in = torch.cat([torch.stack([image_cond[i] for _ in range(n)]) for i, n in enumerate(repeats)] + [image_uncond])
         cond_in = torch.cat([uncond, cond])
         uncond, cond = self.inner_model(x_in, sigma_in, cond=cond_in).chunk(2)
         return uncond + (cond - uncond) * cond_scale
@@ -706,7 +733,10 @@ def main():
                             sigmas = torch.cat([sigmas[:-2], sigmas[-1:]])
                         torch.manual_seed(opt.seed) # changes manual seeding procedure
                         #x = torch.randn([opt.n_samples, *shape], device=device) * sigmas[0] # for GPU draw
-                        x = create_random_tensors(shape, seeds=[seed_f]) * sigmas[0]
+                        
+                        x = create_random_tensors(shape, seeds=[seed_f])
+                        #image_cond = x.new_zeros(x.shape[0], 5, 1, 1, dtype=torch.float16, device=device)
+                        x *= sigmas[0]
                         K.sampling.torch = TorchHijack(sampler_noises if sampler_noises is not None else [])
                         if "dpmpp_sde" in opt.sampler:
                             noise_sampler = create_noise_sampler(x, sigmas, opt)
