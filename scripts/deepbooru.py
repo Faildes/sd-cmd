@@ -5,7 +5,8 @@ import torch
 from PIL import Image
 import numpy as np
 
-from modules import modelloader, paths, deepbooru_model, devices, images, shared
+from scripts import deepbooru_model
+from basicsr.utils.download_util import load_file_from_url
 
 re_special = re.compile(r'([\\()])')
 
@@ -17,28 +18,27 @@ class DeepDanbooru:
     def load(self):
         if self.model is not None:
             return
-
-        files = modelloader.load_models(
-            model_path=os.path.join(paths.models_path, "torch_deepdanbooru"),
-            model_url='https://github.com/AUTOMATIC1111/TorchDeepDanbooru/releases/download/v1/model-resnet_custom_v3.pt',
-            ext_filter=[".pt"],
+        
+        dl = load_file_from_url(
+            model_url="https://github.com/AUTOMATIC1111/TorchDeepDanbooru/releases/download/v1/model-resnet_custom_v3.pt",
+            model_path=os.getcwd(), 
+            True, 
             download_name='model-resnet_custom_v3.pt',
         )
 
         self.model = deepbooru_model.DeepDanbooruModel()
-        self.model.load_state_dict(torch.load(files[0], map_location="cpu"))
+        self.model.load_state_dict(torch.load(dl, map_location="cpu"))
 
         self.model.eval()
-        self.model.to(devices.cpu, devices.dtype)
+        self.model.to(torch.device("cpu"), torch.float16)
 
     def start(self):
         self.load()
-        self.model.to(devices.device)
+        self.model.to(torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"))
 
     def stop(self):
-        if not shared.opts.interrogate_keep_models_in_memory:
-            self.model.to(devices.cpu)
-            devices.torch_gc()
+        self.model.to(torch.device("cpu"))
+        torch_gc()
 
     def tag(self, pil_image):
         self.start()
@@ -48,17 +48,36 @@ class DeepDanbooru:
         return res
 
     def tag_multi(self, pil_image, force_disable_ranks=False):
-        threshold = shared.opts.interrogate_deepbooru_score_threshold
-        use_spaces = shared.opts.deepbooru_use_spaces
-        use_escape = shared.opts.deepbooru_escape
-        alpha_sort = shared.opts.deepbooru_sort_alpha
-        include_ranks = shared.opts.interrogate_return_ranks and not force_disable_ranks
+        threshold = 0.5
+        use_spaces = False
+        use_escape = True
+        alpha_sort = True
+        include_ranks = not force_disable_ranks
 
-        pic = images.resize_image(2, pil_image.convert("RGB"), 512, 512)
+        im = pil_image.convert("RGB")
+        ratio = 1
+        src_ratio = im.width / im.height
+
+        src_w = width if ratio < src_ratio else im.width * height // im.height
+        src_h = height if ratio >= src_ratio else im.height * width // im.width
+
+        resized = im.resize((src_w, src_h), resample=LANCZOS)
+        res = Image.new("RGB", (width, height))
+        res.paste(resized, box=(width // 2 - src_w // 2, height // 2 - src_h // 2))
+
+        if ratio < src_ratio:
+            fill_height = height // 2 - src_h // 2
+            res.paste(resized.resize((width, fill_height), box=(0, 0, width, 0)), box=(0, 0))
+            res.paste(resized.resize((width, fill_height), box=(0, resized.height, width, resized.height)), box=(0, fill_height + src_h))
+        elif ratio > src_ratio:
+            fill_width = width // 2 - src_w // 2
+            res.paste(resized.resize((fill_width, height), box=(0, 0, 0, height)), box=(0, 0))
+            res.paste(resized.resize((fill_width, height), box=(resized.width, 0, resized.width, height)), box=(fill_width + src_w, 0))
+        pic = res
         a = np.expand_dims(np.array(pic, dtype=np.float32), 0) / 255
 
-        with torch.no_grad(), devices.autocast():
-            x = torch.from_numpy(a).to(devices.device)
+        with torch.no_grad(), torch.autocast("cuda"):
+            x = torch.from_numpy(a).to(torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu"))
             y = self.model(x)[0].detach().cpu().numpy()
 
         probability_dict = {}
@@ -79,9 +98,7 @@ class DeepDanbooru:
 
         res = []
 
-        filtertags = set([x.strip().replace(' ', '_') for x in shared.opts.deepbooru_filter_tags.split(",")])
-
-        for tag in [x for x in tags if x not in filtertags]:
+        for tag in [x for x in tags]:
             probability = probability_dict[tag]
             tag_outformat = tag
             if use_spaces:
