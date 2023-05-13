@@ -25,6 +25,8 @@ from ldm.util import instantiate_from_config
 from ldm.models.diffusion.ddim import DDIMSampler
 from ldm.models.diffusion.plms import PLMSSampler
 from ldm.models.diffusion.dpm_solver import DPMSolverSampler
+LANCZOS = (Image.Resampling.LANCZOS if hasattr(Image, 'Resampling') else Image.LANCZOS)
+NEAREST = (Image.Resampling.NEAREST if hasattr(Image, 'Resampling') else Image.NEAREST)
 
 #from diffusers.pipelines.stable_diffusion.safety_checker import StableDiffusionSafetyChecker
 from transformers import AutoFeatureExtractor
@@ -78,7 +80,23 @@ def txt2img_image_conditioning(sd_model, x, width, height, device):
         # Still takes up a bit of memory, but no encoder call.
         # Pretty sure we can just make this a 1x1 image since its not going to be used besides its batch size.
         return x.new_zeros(x.shape[0], 5, 1, 1, dtype=x.dtype, device=x.device)
-    
+def upscale(img, scale):
+    dest_w = int(img.width * scale)
+    dest_h = int(img.height * scale)
+
+    for i in range(3):
+        shape = (img.width, img.height)
+        
+        if shape == (img.width, img.height):
+            break
+
+        if img.width >= dest_w and img.height >= dest_h:
+            break
+
+    if img.width != dest_w or img.height != dest_h:
+        img = img.resize((int(dest_w), int(dest_h)), resample=NEAREST)
+
+    return img    
 class CFGDenoiser(nn.Module):
     def __init__(self, model):
         super().__init__()
@@ -201,6 +219,11 @@ def resize_image(source_image, destination_image, width, height, resize_factor):
                                , interpolation=cv2.INTER_LANCZOS4)
     cv2.imwrite(destination_image, resized_image)
 
+def upscale_image(source_image, destination_image, width, height, resize_factor):
+    image_to_resize = cv2.imread(source_image)
+    resized_image = cv2.resize(image_to_resize, dsize=(width*resize_factor, height*resize_factor)
+                               , interpolation=cv2.INTER_LANCZOS4)
+    cv2.imwrite(destination_image, resized_image)
 
 def improve_image(source_image, destination_image):
     image_to_improve = cv2.imread(source_image)
@@ -766,15 +789,29 @@ def main():
                     x_samples_ddim = accelerator.gather(x_samples_ddim) 
 
                     if accelerator.is_main_process and not opt.skip_save:
+                        batch_images = []
                         for x_sample in x_samples_ddim:
                             x_sample = 255. * np.moveaxis(x_sample.cpu().numpy(), 0, 2)
                             x_sample = x_sample.astype(np.uint8)
-                            img = Image.fromarray(x_sample.astype(np.uint8)).save(os.path.join(sample_path, f"original\\{base_count:08}_{seed_f}.png"))
-                            resize_image(os.path.join(sample_path, f"original\\{base_count:08}_{seed_f}.png")
-                                          , os.path.join(sample_path, f"resized\\{base_count:08}_{seed_f}.png")
-                                          , opt.W, opt.H, opt.resize_factor)
-                            improve_image(os.path.join(sample_path, f"resized\\{base_count:08}_{seed_f}.png")
-                                          , os.path.join(sample_path, f"improved\\{base_count:08}_{seed_f}.png"))
+                            img = Image.fromarray(x_sample.astype(np.uint8))
+                            batch_images.append(img)
+                            if opt.resize_factor > 1.0:
+                                img = upscale(img, opt.resize_factor)
+                                img = np.array(img).astype(np.float32) / 255.0
+                                img = np.moveaxis(img, 2, 0)
+                                batch_images.append(img)
+                        if opt.resize_factor > 1.0:
+                            decoded_samples = torch.from_numpy(np.array(batch_images))
+                            decoded_samples = decoded_samples.to(device)
+                            decoded_samples = 2. * decoded_samples - 1.
+                            samples = model.get_first_stage_encoding(model.encode_first_stage(decoded_samples))
+                            samples = samples[:, :, 0//2:samples.shape[2]-1//2, 0//2:samples.shape[3]-1//2]
+                            noise = create_random_tensors(samples.shape[1:], seeds=seeds, device=device)
+                            torch.cuda.empty_cache()
+                            torch.cuda.ipc_collect()
+                            
+                        for i in batch_images:     
+                            i.save(os.path.join(sample_path, f"original\\{base_count:08}_{seed_f}.png"))
                             base_count += 1
 
                     if accelerator.is_main_process and not opt.skip_grid:
