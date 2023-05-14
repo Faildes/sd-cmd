@@ -473,9 +473,9 @@ def read_quantize(parser):
 def read_resize_factor_parameter(parser):
     parser.add_argument(
         "--resize_factor",
-        type=int,
+        type=float,
         help="Resize factor",
-        default=2
+        default=2.0
     )
 def read_hr_steps(parser):
     parser.add_argument(
@@ -494,11 +494,11 @@ def read_denoise_strength(parser):
 def setup_img2img_steps(p, steps=None):
     if steps is not None:
         requested_steps = (steps or p.ddim_steps)
-        steps = int(requested_steps / min(p.denoise_strength, 0.999)) if p.denoise_strength > 0 else 0
+        steps = int(requested_steps / min(p.strength, 0.999)) if p.strength > 0 else 0
         t_enc = requested_steps - 1
     else:
         steps = p.ddim_steps
-        t_enc = int(min(p.denoise_strength, 0.999) * steps)
+        t_enc = int(min(p.strength, 0.999) * steps)
 
     return steps, t_enc
 class TorchHijack:
@@ -819,7 +819,6 @@ def main():
                             x_sample = x_sample.astype(np.uint8)
                             img = Image.fromarray(x_sample.astype(np.uint8))
                             img.save(os.path.join(sample_path, f"original\\{base_count:08}_{seed_f}.png"))
-                            batch_images.append(img)
                             if opt.resize_factor > 1.0:
                                 img = upscale(img, opt.resize_factor)
                                 img = np.array(img).astype(np.float32) / 255.0
@@ -831,10 +830,14 @@ def main():
                             decoded_samples = 2. * decoded_samples - 1.
                             samples = model.get_first_stage_encoding(model.encode_first_stage(decoded_samples))
                             samples = samples[:, :, 0//2:samples.shape[2]-1//2, 0//2:samples.shape[3]-1//2]
-                            noise = create_random_tensors(samples.shape[1:], seeds=seeds, device=device)
+                            if type(opt.seed) == list:
+                                all_seeds = opt.seed
+                            else:
+                                all_seeds = [int(opt.seed) + a for a in range(len(all_prompts))]
+                            noise = create_random_tensors(samples.shape[1:], seeds=all_seeds, device=device)
                             torch.cuda.empty_cache()
                             torch.cuda.ipc_collect()
-                            hr_steps, t_enc = setup_img2img_steps(opt, opt.hr_step)
+                            hr_steps, t_enc = setup_img2img_steps(opt, opt.hr_steps)
                             if k_d:
                                 if opt.sampler.endswith("_ka"):
                                     sigmas = K.sampling.get_sigmas_karras(hr_steps, sigma_min, sigma_max, device=device)
@@ -857,6 +860,7 @@ def main():
                                     return BrownianTreeNoiseSampler(x, sigma_min, sigma_max, seed=current_iter_seeds)
                                 if opt.sampler == "dpmpp_sde":
                                     noise_sampler = create_noise_sampler(samples, sigmas, opt)
+                                    extra_params_kwargs['noise_sampler'] = noise_sampler
                                 samples_ddim = K.sampling.__dict__[f'sample_{opt.sampler}'](model_wrap_cfg, xi, sigmas, extra_args=extra_args, disable=not accelerator.is_main_process, **extra_params_kwargs)
                                 if karras:
                                     opt.sampler = opt.sampler + "_ka"
