@@ -801,7 +801,7 @@ def main():
                         model_wrap_cfg = CFGDenoiser(model_wrap)
                         extra_args = {'cond': c,  'uncond': uc, 'cond_scale': opt.scale}
                         
-                        samples_ddim = K.sampling.__dict__[f'sample_{opt.sampler}'](model_wrap_cfg, x, sigmas, extra_args=extra_args, disable=not accelerator.is_main_process, **extra_params_kwargs)
+                        samples_ddim = K.sampling.__dict__[f'sample_{opt.sampler}'](model_wrap_cfg, x, extra_args=extra_args, disable=not accelerator.is_main_process, **extra_params_kwargs)
                         if karras:
                             opt.sampler = opt.sampler + "_ka"
                             karras = False
@@ -848,6 +848,7 @@ def main():
                             torch.cuda.ipc_collect()
                             hr_steps, t_enc = setup_img2img_steps(opt, opt.hr_steps)
                             if k_d:
+                                extra_params_kwargs = {}
                                 if opt.sampler.endswith("_ka"):
                                     sigmas = K.sampling.get_sigmas_karras(hr_steps, sigma_min, sigma_max, device=device)
                                     opt.sampler = opt.sampler[:-3]
@@ -882,7 +883,7 @@ def main():
                                 if opt.sampler == "dpmpp_sde":
                                     noise_sampler = create_noise_sampler(samples, sigmas, opt)
                                     extra_params_kwargs['noise_sampler'] = noise_sampler
-                                samples_ddim = K.sampling.__dict__[f'sample_{opt.sampler}'](model_wrap_cfg, xi, sigmas, extra_args=extra_args, disable=not accelerator.is_main_process, **extra_params_kwargs)
+                                samples_ddim = K.sampling.__dict__[f'sample_{opt.sampler}'](model_wrap_cfg, xi, extra_args=extra_args, disable=not accelerator.is_main_process, **extra_params_kwargs)
                                 if karras:
                                     opt.sampler = opt.sampler + "_ka"
                                     karras = False
