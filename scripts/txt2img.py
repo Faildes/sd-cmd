@@ -59,7 +59,7 @@ def numpy_to_pil(images):
     return pil_images
 
 def txt2img_image_conditioning(sd_model, x, width, height, device):
-    if sd_model.conditioning_key in {'hybrid', 'concat'}: # Inpainting models
+    if sd_model.model.conditioning_key in {'hybrid', 'concat'}: # Inpainting models
 
         # The "masked-image" in this case will just be all zeros since the entire image is masked.
         image_conditioning = torch.zeros(x.shape[0], 3, height, width, device=device)
@@ -477,8 +477,30 @@ def read_resize_factor_parameter(parser):
         help="Resize factor",
         default=2
     )
+def read_hr_steps(parser):
+    parser.add_argument(
+        "--hr_steps",
+        type=int,
+        default=0,
+        help="number of high resolutionize sampling steps",
+    )
+def read_denoise_strength(parser):
+    parser.add_argument(
+        "--strength",
+        type=float,
+        default=0.75,
+        help="strength for noising/unnoising. 1.0 corresponds to full destruction of information in init image",
+    )
+def setup_img2img_steps(p, steps=None):
+    if steps is not None:
+        requested_steps = (steps or p.ddim_steps)
+        steps = int(requested_steps / min(p.denoise_strength, 0.999)) if p.denoise_strength > 0 else 0
+        t_enc = requested_steps - 1
+    else:
+        steps = p.ddim_steps
+        t_enc = int(min(p.denoise_strength, 0.999) * steps)
 
- 
+    return steps, t_enc
 class TorchHijack:
     def __init__(self, sampler_noises):
         # Using a deque to efficiently receive the sampler_noises in the same order as the previous index-based
@@ -511,6 +533,8 @@ def main():
     read_skip_grid_parameter(parser)
     read_skip_save_parameter(parser)
     read_ddim_steps_parameter(parser)
+    read_hr_steps(parser)
+    read_denoise_strength(parser)
     read_sampler(parser)
     read_laion400m_parameter(parser)
     read_fixed_code_parameter(parser)
@@ -794,6 +818,7 @@ def main():
                             x_sample = 255. * np.moveaxis(x_sample.cpu().numpy(), 0, 2)
                             x_sample = x_sample.astype(np.uint8)
                             img = Image.fromarray(x_sample.astype(np.uint8))
+                            img.save(os.path.join(sample_path, f"original\\{base_count:08}_{seed_f}.png"))
                             batch_images.append(img)
                             if opt.resize_factor > 1.0:
                                 img = upscale(img, opt.resize_factor)
@@ -809,10 +834,48 @@ def main():
                             noise = create_random_tensors(samples.shape[1:], seeds=seeds, device=device)
                             torch.cuda.empty_cache()
                             torch.cuda.ipc_collect()
-                            
-                        for i in batch_images:     
-                            i.save(os.path.join(sample_path, f"original\\{base_count:08}_{seed_f}.png"))
-                            base_count += 1
+                            hr_steps, t_enc = setup_img2img_steps(opt, opt.hr_step)
+                            if k_d:
+                                if opt.sampler.endswith("_ka"):
+                                    sigmas = K.sampling.get_sigmas_karras(hr_steps, sigma_min, sigma_max, device=device)
+                                    opt.sampler = opt.sampler[:-3]
+                                    karras = True
+                                else:
+                                    sigmas = model_wrap.get_sigmas(hr_steps)
+                                if "dpm_2" in opt.sampler:
+                                    sigmas = torch.cat([sigmas[:-2], sigmas[-1:]])
+                                sigma_sched = sigmas[hr_steps - t_enc - 1:]
+                                xi = samples + noise * sigma_sched[0]
+                                def create_noise_sampler(x, sigmas, opt):
+                                    from k_diffusion.sampling import BrownianTreeNoiseSampler
+                                    sigma_min, sigma_max = sigmas[sigmas > 0].min(), sigmas.max()
+                                    if type(opt.seed) == list:
+                                        all_seeds = opt.seed
+                                    else:
+                                        all_seeds = [int(opt.seed) + a for a in range(len(all_prompts))]
+                                    current_iter_seeds = all_seeds[n * opt.n_samples:(n + 1) * opt.n_samples]
+                                    return BrownianTreeNoiseSampler(x, sigma_min, sigma_max, seed=current_iter_seeds)
+                                if opt.sampler == "dpmpp_sde":
+                                    noise_sampler = create_noise_sampler(samples, sigmas, opt)
+                                samples_ddim = K.sampling.__dict__[f'sample_{opt.sampler}'](model_wrap_cfg, xi, sigmas, extra_args=extra_args, disable=not accelerator.is_main_process, **extra_params_kwargs)
+                                if karras:
+                                    opt.sampler = opt.sampler + "_ka"
+                                    karras = False
+                            else:
+                                x1 = sampler.stochastic_encode(samples, torch.tensor([t_enc] * int(samples.shape[0])).to(device), noise=noise)
+                                samples_ddim = sampler.decode(x1, c, t_enc, unconditional_guidance_scale=opt.scale,
+                                                         unconditional_conditioning=uc,)
+                            x_samples_ddim = [decode_first_stage(model, samples_ddim[i:i+1].to(dtype=torch.float16))[0].cpu() for i in range(samples_ddim.size(0))]
+                            x_samples_ddim = torch.stack(x_samples_ddim).float()
+                            x_samples_ddim = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
+                            del samples_ddim
+                            x_samples_ddim = accelerator.gather(x_samples_ddim) 
+                            base_count = 0
+                            for x_sample in x_samples_ddim:
+                                x_sample = 255. * np.moveaxis(x_sample.cpu().numpy(), 0, 2)
+                                x_sample = x_sample.astype(np.uint8)
+                                img = Image.fromarray(x_sample.astype(np.uint8)).save(os.path.join(sample_path, f"resized\\{base_count:08}_{seed_f}.png"))
+                                base_count += 1
 
                     if accelerator.is_main_process and not opt.skip_grid:
                         all_samples.append(x_samples_ddim)
