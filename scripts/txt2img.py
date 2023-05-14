@@ -786,6 +786,14 @@ def main():
                         #image_cond = x.new_zeros(x.shape[0], 5, 1, 1, dtype=torch.float16, device=device)
                         x *= sigmas[0]
                         K.sampling.torch = TorchHijack(sampler_noises if sampler_noises is not None else [])
+                        parameters = inspect.signature(K.sampling.__dict__[f'sample_{opt.sampler}']).parameters
+                        if 'sigma_min' in parameters:
+                            extra_params_kwargs['sigma_min'] = model_wrap.sigmas[0].item()
+                            extra_params_kwargs['sigma_max'] = model_wrap.sigmas[-1].item()
+                            if 'n' in parameters:
+                                extra_params_kwargs['n'] = steps
+                        else:
+                            extra_params_kwargs['sigmas'] = sigmas
                         if "dpmpp_sde" in opt.sampler:
                             noise_sampler = create_noise_sampler(x, sigmas, opt)
                             extra_params_kwargs['noise_sampler'] = noise_sampler
