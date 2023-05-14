@@ -20,6 +20,7 @@ from contextlib import contextmanager, nullcontext
 import accelerate
 import k_diffusion as K
 from scripts import prompt_parser
+import inspect
 
 from ldm.util import instantiate_from_config
 from ldm.models.diffusion.ddim import DDIMSampler
@@ -858,6 +859,18 @@ def main():
                                         all_seeds = [int(opt.seed) + a for a in range(len(all_prompts))]
                                     current_iter_seeds = all_seeds[n * opt.n_samples:(n + 1) * opt.n_samples]
                                     return BrownianTreeNoiseSampler(x, sigma_min, sigma_max, seed=current_iter_seeds)
+                                parameters = inspect.signature(K.sampling.__dict__[f'sample_{opt.sampler}']).parameters
+                                if 'sigma_min' in parameters:
+                                    ## last sigma is zero which isn't allowed by DPM Fast & Adaptive so taking value before last
+                                    extra_params_kwargs['sigma_min'] = sigma_sched[-2]
+                                if 'sigma_max' in parameters:
+                                    extra_params_kwargs['sigma_max'] = sigma_sched[0]
+                                if 'n' in parameters:
+                                    extra_params_kwargs['n'] = len(sigma_sched) - 1
+                                if 'sigma_sched' in parameters:
+                                    extra_params_kwargs['sigma_sched'] = sigma_sched
+                                if 'sigmas' in parameters:
+                                    extra_params_kwargs['sigmas'] = sigma_sched
                                 if opt.sampler == "dpmpp_sde":
                                     noise_sampler = create_noise_sampler(samples, sigmas, opt)
                                     extra_params_kwargs['noise_sampler'] = noise_sampler
