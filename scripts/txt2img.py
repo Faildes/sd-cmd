@@ -190,8 +190,9 @@ def load_model_from_config(config, ckpt, verbose=False):
     if len(u) > 0 and verbose:
         print("unexpected keys:")
         print(u)
-
+    
     model.cuda()
+    sd_hijack.hijack(model)
     model.eval()
     return model
 
