@@ -2,11 +2,9 @@ import torch
 from torch.nn.functional import silu
 from types import MethodType
 
-import modules.textual_inversion.textual_inversion
-from modules import devices, sd_hijack_optimizations, shared, sd_hijack_checkpoint
-from modules.hypernetworks import hypernetwork
-from modules.shared import cmd_opts
-from modules import sd_hijack_clip, sd_hijack_open_clip, sd_hijack_unet, sd_hijack_xlmr, xlmr
+import scripts.textual_inversion.textual_inversion
+from scripts.hypernetworks import hypernetwork
+from scripts import sd_hijack_optimizations, sd_hijack_checkpoint, sd_hijack_clip, sd_hijack_open_clip, sd_hijack_unet, sd_hijack_xlmr, xlmr
 
 import ldm.modules.attention
 import ldm.modules.diffusionmodules.model
@@ -145,7 +143,7 @@ class StableDiffusionModelHijack:
     clip = None
     optimization_method = None
 
-    embedding_db = modules.textual_inversion.textual_inversion.EmbeddingDatabase()
+    #embedding_db = modules.textual_inversion.textual_inversion.EmbeddingDatabase()
 
     def __init__(self):
         self.embedding_db.add_embedding_dir(cmd_opts.embeddings_dir)
