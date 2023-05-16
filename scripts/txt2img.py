@@ -523,6 +523,18 @@ class TorchHijack:
             if noise.shape == x.shape:
                 return noise
         return torch.randn_like(x)
+def callback_state(d):
+        step = d['i']
+        latent = d["denoised"]
+        if opts.live_preview_content == "Combined":
+            sd_samplers_common.store_latent(latent)
+        self.last_latent = latent
+
+        if self.stop_at is not None and step > self.stop_at:
+            raise sd_samplers_common.InterruptedException
+
+        state.sampling_step = step
+        shared.total_tqdm.update()
 def main():
     cached_uc = [None, None]
     cached_c = [None, None]
@@ -761,7 +773,6 @@ def main():
                     c = torch.cat([prompt_parser.get_learned_conditioning_with_prompt_weights(pr, model) for pr in prompts])
                     shape = [opt.C, opt.H // opt.f, opt.W // opt.f]
                     if k_d:
-                        extra_params_kwargs = {}
                         def create_noise_sampler(x, sigmas, opt):
                             from k_diffusion.sampling import BrownianTreeNoiseSampler
                             sigma_min, sigma_max = sigmas[sigmas > 0].min(), sigmas.max()
@@ -772,7 +783,8 @@ def main():
                             current_iter_seeds = all_seeds[n * opt.n_samples:(n + 1) * opt.n_samples]
                             return BrownianTreeNoiseSampler(x, sigma_min, sigma_max, seed=current_iter_seeds)
                         if opt.sampler.endswith("_ka"):
-                            sigmas = K.sampling.get_sigmas_karras(opt.ddim_steps, sigma_min, sigma_max, device=device)
+                            sigma_min, sigma_max = (model_wrap.sigmas[0].item(), model_wrap.sigmas[-1].item())
+                            sigmas = K.sampling.get_sigmas_karras(opt.ddim_steps, sigma_min=sigma_min, sigma_max=sigma_max, device=device)
                             opt.sampler = opt.sampler[:-3]
                             karras = True
                         else:
@@ -785,7 +797,19 @@ def main():
                         x = create_random_tensors(shape, seeds=[seed_f])
                         #image_cond = x.new_zeros(x.shape[0], 5, 1, 1, dtype=torch.float16, device=device)
                         x *= sigmas[0]
+                        def initialize():
+                            s_churn=0., s_tmin=0., s_tmax=float('inf'), s_noise=1., order, rtol,atol,h_init,pxoeff,icoeff,dcoeff,accept_safety,r
+
+                            K.sampling.torch = TorchHijack(sampler_noises if sampler_noises is not None else [])
+
+                            extra_params_kwargs = {}
+
+                            if 'eta' in inspect.signature(K.sampling.__dict__[f'sample_{opt.sampler}']).parameters:
+                                extra_params_kwargs['eta'] = 1.0
+
+                            return extra_params_kwargs
                         K.sampling.torch = TorchHijack(sampler_noises if sampler_noises is not None else [])
+                        extra_params_kwargs = initialize()
                         parameters = inspect.signature(K.sampling.__dict__[f'sample_{opt.sampler}']).parameters
                         if 'sigma_min' in parameters:
                             extra_params_kwargs['sigma_min'] = model_wrap.sigmas[0].item()
