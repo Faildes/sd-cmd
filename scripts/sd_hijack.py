@@ -141,7 +141,6 @@ class StableDiffusionModelHijack:
     layers = None
     circular_enabled = False
     clip = None
-    optimization_method = None
 
     #embedding_db = modules.textual_inversion.textual_inversion.EmbeddingDatabase()
 
@@ -166,8 +165,6 @@ class StableDiffusionModelHijack:
         apply_weighted_forward(m)
         if m.cond_stage_key == "edit":
             sd_hijack_unet.hijack_ddpm_edit()
-
-        self.optimization_method = apply_optimizations()
 
         self.clip = m.cond_stage_model
 
@@ -194,7 +191,6 @@ class StableDiffusionModelHijack:
             m.cond_stage_model.wrapped.model.token_embedding = m.cond_stage_model.wrapped.model.token_embedding.wrapped
             m.cond_stage_model = m.cond_stage_model.wrapped
 
-        undo_optimizations()
         undo_weighted_forward(m)
 
         self.apply_circular(False)
