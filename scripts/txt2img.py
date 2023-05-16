@@ -523,18 +523,7 @@ class TorchHijack:
             if noise.shape == x.shape:
                 return noise
         return torch.randn_like(x)
-def callback_state(d):
-        step = d['i']
-        latent = d["denoised"]
-        if opts.live_preview_content == "Combined":
-            sd_samplers_common.store_latent(latent)
-        self.last_latent = latent
 
-        if self.stop_at is not None and step > self.stop_at:
-            raise sd_samplers_common.InterruptedException
-
-        state.sampling_step = step
-        shared.total_tqdm.update()
 def main():
     cached_uc = [None, None]
     cached_c = [None, None]
@@ -798,7 +787,6 @@ def main():
                         #image_cond = x.new_zeros(x.shape[0], 5, 1, 1, dtype=torch.float16, device=device)
                         x *= sigmas[0]
                         def initialize():
-                            s_churn=0., s_tmin=0., s_tmax=float('inf'), s_noise=1., order, rtol,atol,h_init,pxoeff,icoeff,dcoeff,accept_safety,r
 
                             K.sampling.torch = TorchHijack(sampler_noises if sampler_noises is not None else [])
 
