@@ -192,7 +192,7 @@ def load_model_from_config(config, ckpt, verbose=False):
         print(u)
     
     model.cuda()
-    sd_hijack.hijack(model)
+    sd_hijack.model_hijack.hijack(model)
     model.eval()
     return model
 
