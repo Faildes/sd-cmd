@@ -19,7 +19,7 @@ from torch import autocast as ac
 from contextlib import contextmanager, nullcontext
 import accelerate
 import k_diffusion as K
-from scripts import prompt_parser
+from scripts import prompt_parser, sd_hijack
 import inspect
 
 from ldm.util import instantiate_from_config
