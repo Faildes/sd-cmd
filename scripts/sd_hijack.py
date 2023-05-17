@@ -148,6 +148,10 @@ class StableDiffusionModelHijack:
         self.embedding_db.add_embedding_dir(cmd_opts.embeddings_dir)
 
     def hijack(self, m):
+        print("Applying xformers cross attention optimization.\n")
+        ldm.modules.attention.CrossAttention.forward = sd_hijack_optimizations.xformers_attention_forward
+        ldm.modules.diffusionmodules.model.AttnBlock.forward = sd_hijack_optimizations.xformers_attnblock_forward
+        
         if type(m.cond_stage_model) == xlmr.BertSeriesModelWithTransformation:
             model_embeddings = m.cond_stage_model.roberta.embeddings
             model_embeddings.token_embedding = EmbeddingsWithFixes(model_embeddings.word_embeddings, self)
@@ -163,6 +167,8 @@ class StableDiffusionModelHijack:
             m.cond_stage_model = sd_hijack_open_clip.FrozenOpenCLIPEmbedderWithCustomWords(m.cond_stage_model, self)
 
         apply_weighted_forward(m)
+		
+		
         if m.cond_stage_key == "edit":
             sd_hijack_unet.hijack_ddpm_edit()
 
